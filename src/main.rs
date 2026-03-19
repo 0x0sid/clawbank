@@ -19,6 +19,7 @@ use banker::Banker;
 use dashboard::{build_router, DashboardState};
 use execution::okx_cex::OkxCexExecutor;
 use execution::okx_onchain::OkxOnchainExecutor;
+use execution::okx_rest::OkxRestClient;
 use guardian::Guardian;
 use monitor::Monitor;
 use types::{DashboardEvent, PolicyConfig};
@@ -119,8 +120,8 @@ async fn main() {
     // Task 3: OKX portfolio poller (every 30s)
     let poller_monitor = Arc::clone(&monitor);
     let poller_banker = Arc::clone(&banker);
-    let poller_cex = Arc::clone(&cex_executor);
     let poller_tx = tx.clone();
+    let okx_rest = Arc::new(OkxRestClient::new());
 
     let poller_task = tokio::spawn(async move {
         let interval_secs: u64 = std::env::var("RECALL_CHECK_INTERVAL_SECS")
@@ -133,9 +134,15 @@ async fn main() {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)).await;
 
-            // Stub: In production this calls OKX REST API for real balances
-            // For now, produce an empty update
-            let balances: HashMap<String, f64> = HashMap::new();
+            // Fetch real balances from OKX (falls back to simulated if no creds)
+            let balances = match okx_rest.get_balances().await {
+                Ok(b) => b,
+                Err(e) => {
+                    error!("Portfolio fetch failed: {e}");
+                    HashMap::new()
+                }
+            };
+
             poller_monitor.update_portfolio(balances.clone()).await;
 
             let _ = poller_tx.send(DashboardEvent::PortfolioUpdate {
@@ -143,33 +150,53 @@ async fn main() {
                 timestamp: chrono::Utc::now(),
             });
 
+            // Fetch open positions for P&L tracking
+            let positions = match okx_rest.get_positions().await {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("Position fetch failed: {e}");
+                    Vec::new()
+                }
+            };
+
             // Check active credit lines for P&L violations
             let active_lines = poller_banker.get_active_lines().await;
             for line in &active_lines {
-                // In production: compare line.spent_usd against real P&L from OKX
-                // If loss >= max_loss_usd, trigger force-recall
-                if line.spent_usd > line.conditions.max_loss_usd {
+                // Sum unrealized P&L across all positions for this line's pairs
+                let total_loss: f64 = positions
+                    .iter()
+                    .filter(|p| line.conditions.allowed_pairs.contains(&p.inst_id))
+                    .map(|p| p.unrealized_pnl)
+                    .filter(|pnl| *pnl < 0.0)
+                    .map(|pnl| pnl.abs())
+                    .sum();
+
+                let effective_loss = line.spent_usd + total_loss;
+
+                if effective_loss > line.conditions.max_loss_usd {
                     warn!(
                         agent_id = %line.agent_id,
-                        spent = line.spent_usd,
+                        effective_loss = effective_loss,
                         max_loss = line.conditions.max_loss_usd,
                         "Max loss exceeded — triggering force recall"
                     );
 
-                    // Cancel all orders via OKX
+                    // FORCE RECALL:
+                    // 1. Cancel all orders via OKX REST API
                     for pair in &line.conditions.allowed_pairs {
-                        if let Err(e) = poller_cex.cancel_all_orders(pair).await {
+                        if let Err(e) = okx_rest.cancel_all_orders(pair).await {
                             error!(pair = %pair, error = %e, "Failed to cancel orders");
                         }
                     }
 
-                    // Recall the credit line
+                    // 2. Recall the credit line (blocks future proposals)
                     if let Err(e) = poller_banker
                         .recall(
                             line.agent_id,
                             format!(
-                                "Max loss exceeded: ${:.2} > ${:.2}",
-                                line.spent_usd, line.conditions.max_loss_usd
+                                "Max loss exceeded: ${:.2} > ${:.2} (spent=${:.2} + unrealized_loss=${:.2})",
+                                effective_loss, line.conditions.max_loss_usd,
+                                line.spent_usd, total_loss,
                             ),
                         )
                         .await

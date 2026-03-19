@@ -1,0 +1,35 @@
+# OpenClaw agent configuration for local testing
+# Copy to ~/.openclaw/config.yaml and adjust paths
+
+skills:
+  - name: ai-bank
+    command: ./target/release/openclaw-aibank
+    transport: stdio
+    description: "Supervised agentic trading — borrow, trade, repay via OKX"
+
+# Agent LLM provider — choose one:
+
+# Option 1: Local Ollama (free, private, no API key needed)
+# Make sure Ollama is running: ollama serve
+# Pull a model first: ollama pull llama3
+llm:
+  provider: ollama
+  base_url: http://localhost:11434/v1
+  model: llama3
+
+# Option 2: OpenRouter with Nemotron (free tier)
+# Uncomment below and comment out the Ollama block above
+# llm:
+#   provider: openrouter
+#   base_url: https://openrouter.ai/api/v1
+#   model: nvidia/nemotron-3-super-120b-a12b:free
+#   api_key: ${OPENROUTER_API_KEY}
+
+# Agent supervisor settings
+supervisor:
+  # How often the supervisor reviews agent behaviour (seconds)
+  review_interval: 60
+  # Maximum concurrent agents
+  max_agents: 3
+  # Auto-recall if agent stops responding for this many seconds
+  heartbeat_timeout: 120
