@@ -1,0 +1,100 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+okx-config.json
+*.pem
+*.key
+
+# OKX credentials (managed by okx config init)
+.okx/
+
+# Backup files
+*.bak
+*.backup
+
+# Temporary files
+*.tmp
+*.temp
+
+# Node.js (for OKX tools if installed locally)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Foundry/Solidity
+lib/
+cache/
+out/
+
+# Test coverage
+tarpaulin-report.html
+cobertura.xml
+
+# Profiling
+perf.data*
+flamegraph.svg
+
+# Local development
+local/
+dev/
+debug/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Redis dump
+dump.rdb
+
+# Prometheus metrics
+metrics.dat
+
+# CI/CD
+.github/workflows/local-*
+
+# Documentation build
+docs/build/
+book/
+
+# Rust analyzer
+.rust-analyzer/
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# Kubernetes
+*.kubeconfig
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Local scripts not meant for repo
+scripts/local-*
+run.sh
+start.sh
