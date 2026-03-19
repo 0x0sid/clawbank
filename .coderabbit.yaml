@@ -1,0 +1,31 @@
+language: en-US
+reviews:
+  profile: assertive
+  request_changes_workflow: true
+  high_level_summary: true
+  poem: false
+  path_instructions:
+    - path: "src/guardian.rs"
+      instructions: >
+        Safety-critical financial code. Flag any bypass path around
+        check_credit_line. Eliminate all unwrap()/expect(). Check every
+        arithmetic operation for overflow. Verify check order is unchanged.
+    - path: "src/banker.rs"
+      instructions: >
+        Check scoring formula edge cases. Verify force-recall is atomic.
+        No race condition between reading and writing remaining_usd.
+        Verify RwLock usage has no deadlocks.
+    - path: "contracts/*.sol"
+      instructions: >
+        ERC-4337 treasury. Check validateUserOp for bypass paths. Verify
+        signature recovery. Check reentrancy on withdrawals. Verify 0.8+
+        overflow protection is active.
+    - path: "src/mcp/skill.rs"
+      instructions: >
+        stdout must never be contaminated with logs. Check JSON-RPC parsing
+        does not panic on malformed input. Verify all handlers return correct
+        MCP error codes on failure.
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches: [main, dev]
