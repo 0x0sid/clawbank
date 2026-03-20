@@ -381,6 +381,7 @@ impl Default for PolicyConfig {
 
 /// Unified error type for the system.
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum AppError {
     #[error("Agent not registered: {0}")]
     AgentNotRegistered(Uuid),

@@ -45,6 +45,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 | `OKX_ONCHAIN_API_KEY` | For DeFi | | OKX OnchainOS key |
 | `BANKER_KEY` | For on-chain | | Treasury co-signing private key |
 | `TREASURY_ADDRESS` | For on-chain | | Deployed contract address |
+| `TREASURY_RPC_URL` | For on-chain | `https://sepolia.base.org` | EVM JSON-RPC endpoint |
 | `DASHBOARD_PORT` | No | 3030 | Dashboard HTTP port |
 | `RUST_LOG` | No | info | Log level |
 

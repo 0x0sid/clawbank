@@ -210,7 +210,7 @@ async fn write_response(
     response: &JsonRpcResponse,
 ) -> Result<(), std::io::Error> {
     let json = serde_json::to_string(response).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::Other, format!("Serialize error: {e}"))
+        std::io::Error::other(format!("Serialize error: {e}"))
     })?;
     stdout.write_all(json.as_bytes()).await?;
     stdout.write_all(b"\n").await?;
@@ -456,6 +456,7 @@ async fn handle_request_credit(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_propose_trade(
     req: &JsonRpcRequest,
     banker: &Arc<Banker>,
@@ -622,7 +623,11 @@ async fn handle_propose_trade(
             )
         }
         Err(e) => {
-            warn!(proposal_id = %proposal.id, error = %e, "Trade execution failed");
+            warn!(proposal_id = %proposal.id, error = %e, "Trade execution failed — refunding credit");
+            // Refund the deducted amount so the agent doesn't lose budget
+            if let Err(refund_err) = banker.refund(agent_id, amount_usd).await {
+                error!(agent_id = %agent_id, error = %refund_err, "Failed to refund credit after execution failure");
+            }
             JsonRpcResponse::error(
                 req.id.clone(),
                 -32000,

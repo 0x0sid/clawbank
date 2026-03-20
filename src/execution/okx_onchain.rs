@@ -16,6 +16,12 @@ pub struct OkxOnchainExecutor {
     process: Mutex<Option<Child>>,
 }
 
+impl Default for OkxOnchainExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OkxOnchainExecutor {
     /// Create a new OKX Onchain executor. Does not start the subprocess yet.
     pub fn new() -> Self {

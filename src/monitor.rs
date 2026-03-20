@@ -22,6 +22,12 @@ pub struct Monitor {
     portfolio: Arc<RwLock<HashMap<String, f64>>>,
 }
 
+impl Default for Monitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Monitor {
     /// Create a new Monitor.
     pub fn new() -> Self {

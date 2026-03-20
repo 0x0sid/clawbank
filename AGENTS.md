@@ -89,6 +89,8 @@ src/
   execution/
     okx_cex.rs      OKX Agent Trade Kit MCP proxy
     okx_onchain.rs  OKX OnchainOS skills proxy
+    okx_rest.rs     OKX REST client with HMAC-SHA256 signing
+    treasury.rs     On-chain AgentTreasury contract client
   mcp/
     skill.rs        JSON-RPC over stdio
 contracts/

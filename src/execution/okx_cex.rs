@@ -16,6 +16,12 @@ pub struct OkxCexExecutor {
     process: Mutex<Option<Child>>,
 }
 
+impl Default for OkxCexExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OkxCexExecutor {
     /// Create a new OKX CEX executor. Does not start the subprocess yet.
     pub fn new() -> Self {
@@ -79,7 +85,7 @@ impl OkxCexExecutor {
             });
 
             let request_str = serde_json::to_string(&request)
-                .map_err(|e| AppError::SerdeError(e))?;
+                .map_err(AppError::SerdeError)?;
 
             // Write to subprocess stdin
             if let Some(stdin) = child.stdin.as_mut() {
@@ -106,7 +112,7 @@ impl OkxCexExecutor {
                 })?;
 
                 let response: serde_json::Value =
-                    serde_json::from_str(&line).map_err(|e| AppError::SerdeError(e))?;
+                    serde_json::from_str(&line).map_err(AppError::SerdeError)?;
 
                 info!(
                     proposal_id = %proposal.id,
@@ -146,6 +152,7 @@ impl OkxCexExecutor {
     }
 
     /// Attempt to cancel all orders for the given instrument (used during force-recall).
+    #[allow(dead_code)]
     pub async fn cancel_all_orders(&self, pair: &str) -> Result<(), AppError> {
         let proc = self.process.lock().await;
         if proc.is_none() {

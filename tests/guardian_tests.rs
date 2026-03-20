@@ -2,7 +2,6 @@
 
 use openclaw_aibank::types::*;
 use openclaw_aibank::guardian::Guardian;
-use openclaw_aibank::banker::Banker;
 use chrono::{Duration, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;

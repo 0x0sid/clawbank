@@ -40,6 +40,11 @@ contract AgentTreasury {
         _;
     }
 
+    modifier onlyEntryPoint() {
+        require(msg.sender == address(_entryPoint), "not entrypoint");
+        _;
+    }
+
     constructor(address _banker, IEntryPoint entryPointAddr) {
         banker = _banker;
         _entryPoint = entryPointAddr;
@@ -71,12 +76,12 @@ contract AgentTreasury {
     }
 
     /// @notice Validate a UserOperation against credit constraints.
-    /// @dev Called by the EntryPoint. Checks banker co-signature, expiry, and ceiling.
+    /// @dev Called by the EntryPoint only. Checks banker co-signature, expiry, and ceiling.
     function validateUserOp(
         PackedUserOperation calldata userOp,
         bytes32 userOpHash,
         uint256 /* missingAccountFunds */
-    ) external returns (uint256) {
+    ) external onlyEntryPoint returns (uint256) {
         // Decode dual signature: (agentSig, bankerSig)
         (, bytes memory bankerSig) = abi.decode(userOp.signature, (bytes, bytes));
 
@@ -106,6 +111,23 @@ contract AgentTreasury {
     /// @notice Get the EntryPoint address.
     function entryPoint() public view returns (IEntryPoint) {
         return _entryPoint;
+    }
+
+    /// @notice Accept ETH deposits into the treasury.
+    receive() external payable {}
+
+    /// @notice Banker can withdraw ERC-20 tokens from the treasury.
+    /// @param token The ERC-20 token address.
+    /// @param to Recipient address.
+    /// @param amount Amount to withdraw.
+    function withdrawToken(address token, address to, uint256 amount)
+        external
+        onlyBanker
+    {
+        (bool success, ) = token.call(
+            abi.encodeWithSignature("transfer(address,uint256)", to, amount)
+        );
+        require(success, "transfer failed");
     }
 
     // -----------------------------------------------------------------------

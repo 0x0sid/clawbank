@@ -138,3 +138,42 @@ async fn banker_no_active_line_for_unregistered() {
     let banker = Banker::new(make_tx());
     assert!(banker.get_active_line(Uuid::new_v4()).await.is_none());
 }
+
+#[tokio::test]
+async fn banker_refund_restores_budget() {
+    let banker = Banker::new(make_tx());
+    let agent = banker.register_agent("refund-test".to_string()).await;
+    let proposal = good_proposal(agent.id);
+    let decision = banker.evaluate(&proposal).await;
+    assert!(decision.approved);
+
+    let line_before = banker.get_active_line(agent.id).await.unwrap();
+
+    // Deduct some amount
+    banker.deduct(agent.id, 1_000.0).await.unwrap();
+    let line_after_deduct = banker.get_active_line(agent.id).await.unwrap();
+    assert!((line_after_deduct.remaining_usd - (line_before.remaining_usd - 1_000.0)).abs() < 0.01);
+
+    // Refund it
+    banker.refund(agent.id, 1_000.0).await.unwrap();
+    let line_after_refund = banker.get_active_line(agent.id).await.unwrap();
+    assert!((line_after_refund.remaining_usd - line_before.remaining_usd).abs() < 0.01);
+    assert!((line_after_refund.spent_usd - line_before.spent_usd).abs() < 0.01);
+}
+
+#[tokio::test]
+async fn banker_expired_line_returns_none() {
+    let banker = Banker::new(make_tx());
+    let agent = banker.register_agent("expire-test".to_string()).await;
+
+    // Create a proposal with a window_end in the past
+    let mut proposal = good_proposal(agent.id);
+    proposal.window_end = Utc::now() - Duration::seconds(1);
+
+    let decision = banker.evaluate(&proposal).await;
+    // The line may be approved but with an already-past expiry
+    if decision.approved {
+        // get_active_line should return None and mark it Expired
+        assert!(banker.get_active_line(agent.id).await.is_none());
+    }
+}

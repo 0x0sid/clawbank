@@ -119,8 +119,12 @@ impl Guardian {
                     recent_proposals: Vec::new(),
                     cumulative_risk_score: 0.0,
                 });
+            // Prune timestamps older than 1 hour to prevent unbounded growth
+            let one_hour_ago = Utc::now() - chrono::Duration::hours(1);
+            entry.recent_proposals.retain(|t| *t > one_hour_ago);
             entry.recent_proposals.push(Utc::now());
-            entry.cumulative_risk_score += composite_risk;
+            // Decay cumulative risk score by 10% each proposal, then add new risk
+            entry.cumulative_risk_score = entry.cumulative_risk_score * 0.9 + composite_risk;
         }
 
         let result = GuardianResult {

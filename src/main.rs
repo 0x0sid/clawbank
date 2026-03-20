@@ -20,6 +20,7 @@ use dashboard::{build_router, DashboardState};
 use execution::okx_cex::OkxCexExecutor;
 use execution::okx_onchain::OkxOnchainExecutor;
 use execution::okx_rest::OkxRestClient;
+use execution::treasury::TreasuryClient;
 use guardian::Guardian;
 use monitor::Monitor;
 use types::{DashboardEvent, PolicyConfig};
@@ -52,7 +53,8 @@ async fn main() {
     let (tx, _) = broadcast::channel::<DashboardEvent>(256);
 
     // Core components
-    let banker = Arc::new(Banker::new(tx.clone()));
+    let treasury = Arc::new(TreasuryClient::new());
+    let banker = Arc::new(Banker::with_treasury(tx.clone(), treasury));
     let monitor = Arc::new(Monitor::new());
     let guardian = Arc::new(Guardian::new(
         banker.credit_lines_read(),
@@ -176,12 +178,10 @@ async fn main() {
                     .map(|pnl| pnl.abs())
                     .sum();
 
-                let effective_loss = line.spent_usd + total_loss;
-
-                if effective_loss > line.conditions.max_loss_usd {
+                if total_loss > line.conditions.max_loss_usd {
                     warn!(
                         agent_id = %line.agent_id,
-                        effective_loss = effective_loss,
+                        unrealized_loss = total_loss,
                         max_loss = line.conditions.max_loss_usd,
                         "Max loss exceeded — triggering force recall"
                     );
@@ -199,9 +199,8 @@ async fn main() {
                         .recall(
                             line.agent_id,
                             format!(
-                                "Max loss exceeded: ${:.2} > ${:.2} (spent=${:.2} + unrealized_loss=${:.2})",
-                                effective_loss, line.conditions.max_loss_usd,
-                                line.spent_usd, total_loss,
+                                "Max loss exceeded: unrealized_loss=${:.2} > max_loss=${:.2}",
+                                total_loss, line.conditions.max_loss_usd,
                             ),
                         )
                         .await

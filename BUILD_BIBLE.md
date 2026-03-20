@@ -26,14 +26,14 @@
 - [x] `src/execution/okx_rest.rs` — real OKX REST client with HMAC-SHA256 signing ✅ builds ⚠️ NOT TESTED LIVE — OKX_PASSPHRASE missing in .env
 - [x] Real portfolio poller replacing the stub in `main.rs` ✅ runs every 30s, falls back to simulated data if no creds
 - [x] Force-cancel via OKX cancel-all-orders on credit recall ✅ implemented, wired to P&L position tracking ⚠️ not tested live
-- [x] `.env` auto-loading via dotenvy ✅ builds ⚠️ NOT YET COMMITTED
+- [x] `.env` auto-loading via dotenvy ✅ builds, committed
 
 ### Week 3-4 — On-chain treasury
 
 - [x] `contracts/AgentTreasury.sol` — ERC-4337 with validateUserOp credit enforcement ✅ written ⚠️ NOT COMPILED (Foundry not installed)
-- [ ] `contracts/test/AgentTreasury.t.sol` — Foundry unit + fuzz tests
+- [x] `contracts/test/AgentTreasury.t.sol` — Foundry unit + fuzz tests ✅ written ⚠️ NOT COMPILED (Foundry not installed)
 - [ ] Deploy to Base Sepolia testnet
-- [ ] Wire Banker `grantCredit` / `recallCredit` to contract after `CreditDecision`
+- [x] Wire Banker `grantCredit` / `recallCredit` to contract after `CreditDecision` ✅ TreasuryClient in `src/execution/treasury.rs`, wired into Banker ⚠️ tx signing not yet implemented (needs `alloy` crate)
 
 ### Week 5-6 — Hardening
 
@@ -60,7 +60,6 @@
 - ⚠️ CI workflows haven't been triggered yet — need to open a PR or push to trigger
 - ⚠️ Dashboard not E2E tested with a real browser session
 - ⚠️ Solidity contract not compiled — Foundry not installed
-- ⚠️ dotenvy addition (`Cargo.toml` + `src/main.rs`) not yet committed
 
 ---
 

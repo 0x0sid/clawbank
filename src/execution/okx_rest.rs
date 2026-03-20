@@ -50,6 +50,12 @@ pub struct OkxRestClient {
     credentials: Option<OkxCredentials>,
 }
 
+impl Default for OkxRestClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OkxRestClient {
     /// Create a new OKX REST client. If credentials are not available,
     /// all calls return stub/simulated data.
@@ -278,6 +284,7 @@ impl OkxRestClient {
 
 /// A parsed OKX position for P&L tracking.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct OkxPosition {
     pub inst_id: String,
     pub unrealized_pnl: f64,

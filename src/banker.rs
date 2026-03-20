@@ -3,6 +3,7 @@
 //! The Banker is the only component with **write access** to credit lines.
 //! The Guardian has read-only access. This separation is a critical security invariant.
 
+use crate::execution::treasury::TreasuryClient;
 use crate::types::{
     Agent, AgentReputation, ApprovedConditions, CreditDecision, CreditLine, CreditProposal,
     CreditStatus, DashboardEvent,
@@ -11,7 +12,7 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 /// The Banker manages credit lines, scores proposals, and tracks agent reputation.
@@ -24,16 +25,32 @@ pub struct Banker {
     agents: Arc<RwLock<HashMap<Uuid, Agent>>>,
     /// Dashboard event broadcaster.
     tx: broadcast::Sender<DashboardEvent>,
+    /// On-chain treasury client (None = stub mode, used in tests).
+    treasury: Option<Arc<TreasuryClient>>,
 }
 
 impl Banker {
-    /// Create a new Banker instance.
+    /// Create a new Banker instance (no on-chain treasury — stub mode).
+    /// Used in tests; production uses `with_treasury()`.
+    #[allow(dead_code)]
     pub fn new(tx: broadcast::Sender<DashboardEvent>) -> Self {
         Self {
             credit_lines: Arc::new(RwLock::new(HashMap::new())),
             reputations: Arc::new(RwLock::new(HashMap::new())),
             agents: Arc::new(RwLock::new(HashMap::new())),
             tx,
+            treasury: None,
+        }
+    }
+
+    /// Create a Banker with an on-chain treasury client for production use.
+    pub fn with_treasury(tx: broadcast::Sender<DashboardEvent>, treasury: Arc<TreasuryClient>) -> Self {
+        Self {
+            credit_lines: Arc::new(RwLock::new(HashMap::new())),
+            reputations: Arc::new(RwLock::new(HashMap::new())),
+            agents: Arc::new(RwLock::new(HashMap::new())),
+            tx,
+            treasury: Some(treasury),
         }
     }
 
@@ -48,8 +65,7 @@ impl Banker {
         self.agents.write().await.insert(agent.id, agent.clone());
 
         // Initialize reputation for new agent
-        let mut rep = AgentReputation::default();
-        rep.agent_id = agent.id;
+        let rep = AgentReputation { agent_id: agent.id, ..Default::default() };
         self.reputations.write().await.insert(agent.id, rep);
 
         info!(agent_id = %agent.id, name = %name, "Agent registered");
@@ -153,6 +169,16 @@ impl Banker {
             "Credit line granted"
         );
 
+        // On-chain: call grantCredit on AgentTreasury contract
+        if let Some(ref treasury) = self.treasury {
+            // TODO(week3): Map agent UUID to EVM address via a registry.
+            // For now, use the agent_id hex as a placeholder address.
+            let agent_addr = format!("0x{}", proposal.agent_id.simple());
+            if let Err(e) = treasury.grant_credit(&agent_addr, approved_usd, proposal.window_end).await {
+                error!(agent_id = %proposal.agent_id, error = %e, "On-chain grantCredit failed");
+            }
+        }
+
         let _ = self.tx.send(DashboardEvent::CreditApproved {
             credit_line: credit_line.clone(),
         });
@@ -168,20 +194,22 @@ impl Banker {
     }
 
     /// Get the active credit line for an agent, if any.
+    /// Automatically marks expired lines as `Expired` so the poller skips them.
     pub async fn get_active_line(&self, agent_id: Uuid) -> Option<CreditLine> {
-        let lines = self.credit_lines.read().await;
-        lines.get(&agent_id).and_then(|line| {
-            if line.status == CreditStatus::Active {
-                // Check expiry
-                if Utc::now() > line.expires_at {
-                    None
-                } else {
-                    Some(line.clone())
-                }
-            } else {
-                None
-            }
-        })
+        let mut lines = self.credit_lines.write().await;
+        let line = lines.get_mut(&agent_id)?;
+
+        if line.status != CreditStatus::Active {
+            return None;
+        }
+
+        if Utc::now() > line.expires_at {
+            line.status = CreditStatus::Expired;
+            info!(agent_id = %agent_id, "Credit line expired — status updated");
+            return None;
+        }
+
+        Some(line.clone())
     }
 
     /// Deduct an amount from an agent's credit line after a trade is approved.
@@ -221,6 +249,37 @@ impl Banker {
         Ok(())
     }
 
+    /// Refund a previously deducted amount back to the credit line.
+    /// Used when trade execution fails after deduction to prevent budget leaks.
+    pub async fn refund(
+        &self,
+        agent_id: Uuid,
+        amount: f64,
+    ) -> Result<(), crate::types::AppError> {
+        let mut lines = self.credit_lines.write().await;
+        let line = lines
+            .get_mut(&agent_id)
+            .ok_or(crate::types::AppError::NoCreditLine(agent_id))?;
+
+        line.spent_usd -= amount;
+        line.remaining_usd += amount;
+
+        info!(
+            agent_id = %agent_id,
+            amount = amount,
+            remaining = line.remaining_usd,
+            "Credit refunded after failed execution"
+        );
+
+        let _ = self.tx.send(DashboardEvent::BudgetUpdate {
+            agent_id,
+            spent_usd: line.spent_usd,
+            remaining_usd: line.remaining_usd,
+        });
+
+        Ok(())
+    }
+
     /// Force-recall a credit line. Blocks all future proposals until a new line is approved.
     pub async fn recall(
         &self,
@@ -246,6 +305,14 @@ impl Banker {
             reason = %reason,
             "Credit line recalled"
         );
+
+        // On-chain: call recallCredit on AgentTreasury contract
+        if let Some(ref treasury) = self.treasury {
+            let agent_addr = format!("0x{}", agent_id.simple());
+            if let Err(e) = treasury.recall_credit(&agent_addr, &reason).await {
+                error!(agent_id = %agent_id, error = %e, "On-chain recallCredit failed");
+            }
+        }
 
         let _ = self.tx.send(DashboardEvent::CreditRecalled {
             agent_id,
@@ -296,9 +363,7 @@ impl Banker {
             .get(&agent_id)
             .cloned()
             .unwrap_or_else(|| {
-                let mut rep = AgentReputation::default();
-                rep.agent_id = agent_id;
-                rep
+                AgentReputation { agent_id, ..Default::default() }
             })
     }
 
