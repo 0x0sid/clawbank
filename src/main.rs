@@ -32,6 +32,11 @@ use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() {
+    // Load .env file if present (non-fatal if missing)
+    if let Err(e) = dotenvy::dotenv() {
+        eprintln!("Note: .env not loaded ({e}) — using system environment");
+    }
+
     // All logging goes to stderr — stdout is MCP protocol only
     tracing_subscriber::fmt()
         .with_env_filter(

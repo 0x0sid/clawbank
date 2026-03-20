@@ -8,27 +8,29 @@
 
 ### Immediate (build these first)
 
-- [ ] `src/types.rs` — add `CreditProposal`, `CreditLine`, `CreditDecision`, `CreditStatus`, `RepaymentTrigger`, `Collateral`, `AgentReputation`
-- [ ] `src/banker.rs` — credit line registry, deterministic scoring, force-recall, reputation tracking
-- [ ] `src/guardian.rs` — add `check_credit_line` as the first check (before existing 5)
-- [ ] `src/mcp/skill.rs` — add `request_credit`, `repay_credit`, `get_credit_line` to manifest and handlers
-- [ ] `src/monitor.rs` — add credit line state to `DashboardSnapshot`
-- [ ] `src/dashboard.rs` — add Credit Lines panel (budget bar, time countdown, status badge)
-- [ ] `.github/workflows/ci.yml` — full CI pipeline
-- [ ] `.github/workflows/security.yml` — weekly audit
-- [ ] `.coderabbit.yaml` — AI review config
-- [ ] `deny.toml` — license and supply chain policy
+- [x] `src/types.rs` — all types implemented: CreditProposal, CreditLine, CreditDecision, CreditStatus, RepaymentTrigger, Collateral, AgentReputation, DashboardEvent variants ✅ tested
+- [x] `src/banker.rs` — credit line registry, deterministic scoring, force-recall, reputation tracking ✅ tested (10 unit + 7 integration)
+- [x] `src/guardian.rs` — 6-check pipeline, check_credit_line is always first ✅ tested (10 unit + 7 integration)
+- [x] `src/mcp/skill.rs` — 8 tools over JSON-RPC stdio, all handlers wired ✅ tested (7 integration)
+- [x] `src/monitor.rs` — in-memory state store, portfolio + proposals ✅ builds, exercised by poller
+- [x] `src/dashboard.rs` — Axum HTTP + WebSocket + inline HTML ✅ builds, serves on :3030 ⚠️ not E2E tested with browser
+- [x] `.github/workflows/ci.yml` — fmt → clippy → test → build → audit → deny → solhint ⚠️ not triggered yet (no PR opened)
+- [x] `.github/workflows/security.yml` — weekly cargo audit + cargo deny ⚠️ not triggered yet (scheduled)
+- [x] `.coderabbit.yaml` — AI review config with path-specific instructions ⚠️ not triggered yet (no PR opened)
+- [x] `deny.toml` — license and supply chain policy ✅ builds
 
 ### Week 2 — OKX execution wiring
 
-- [ ] `src/execution/okx_cex.rs` — proxy to OKX Agent Trade Kit MCP subprocess
-- [ ] `src/execution/okx_onchain.rs` — proxy to OKX OnchainOS skills (DEX swap, bridge, contracts)
-- [ ] Real portfolio poller replacing the stub in `main.rs`
-- [ ] Force-cancel via OKX cancel-all-orders on credit recall
+- [x] `src/execution/okx_cex.rs` — proxy to OKX Agent Trade Kit MCP subprocess ✅ builds ⚠️ simulated (okx-trade-mcp not installed)
+- [x] `src/execution/okx_onchain.rs` — proxy to OKX OnchainOS skills subprocess ✅ builds ⚠️ simulated (onchainos-skills not installed)
+- [x] `src/execution/okx_rest.rs` — real OKX REST client with HMAC-SHA256 signing ✅ builds ⚠️ NOT TESTED LIVE — OKX_PASSPHRASE missing in .env
+- [x] Real portfolio poller replacing the stub in `main.rs` ✅ runs every 30s, falls back to simulated data if no creds
+- [x] Force-cancel via OKX cancel-all-orders on credit recall ✅ implemented, wired to P&L position tracking ⚠️ not tested live
+- [x] `.env` auto-loading via dotenvy ✅ builds ⚠️ NOT YET COMMITTED
 
 ### Week 3-4 — On-chain treasury
 
-- [ ] `contracts/AgentTreasury.sol` — ERC-4337 with `validateUserOp` credit enforcement
+- [x] `contracts/AgentTreasury.sol` — ERC-4337 with validateUserOp credit enforcement ✅ written ⚠️ NOT COMPILED (Foundry not installed)
 - [ ] `contracts/test/AgentTreasury.t.sol` — Foundry unit + fuzz tests
 - [ ] Deploy to Base Sepolia testnet
 - [ ] Wire Banker `grantCredit` / `recallCredit` to contract after `CreditDecision`
@@ -49,6 +51,16 @@
 - [ ] Agent reputation ledger persisted on-chain
 - [ ] Cross-agent collision detection (two agents on same pair simultaneously)
 - [ ] Solidity audit (Foundry + Slither + manual review)
+
+### Known issues
+
+- ⚠️ OKX API key has **Read-only** permission — need **Trade** permission enabled on OKX for live execution
+- ⚠️ `OKX_PASSPHRASE` is empty in `.env` — must be filled in for HMAC signing to work
+- ⚠️ `okx-trade-mcp` and `onchainos-skills` not installed — CEX/DeFi trades are simulated
+- ⚠️ CI workflows haven't been triggered yet — need to open a PR or push to trigger
+- ⚠️ Dashboard not E2E tested with a real browser session
+- ⚠️ Solidity contract not compiled — Foundry not installed
+- ⚠️ dotenvy addition (`Cargo.toml` + `src/main.rs`) not yet committed
 
 ---
 
