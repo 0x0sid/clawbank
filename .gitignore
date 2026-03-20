@@ -1,8 +1,3 @@
-# AI agent instruction files (local only)
-AGENTS.md
-BUILD_BIBLE.md
-CLAUDE.md
-
 # Rust
 /target/
 **/*.rs.bk

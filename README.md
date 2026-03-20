@@ -71,28 +71,6 @@ OpenClaw Agent(s) → MCP stdio (JSON-RPC 2.0)
 | `get_risk_score` | Current agent reputation/risk score |
 | `get_credit_line` | Read active credit line state |
 
-## Project status
-
-**Current: Week 2 complete**
-
-- Core system fully implemented and tested (34/34 tests passing)
-- Banker with credit scoring, approval, force-recall, reputation tracking
-- Guardian with 6-check risk verification (credit line first, always)
-- MCP skill with 8 JSON-RPC tools over stdio
-- Live WebSocket dashboard at `:3030` with inline HTML (no build step)
-- OKX REST client with HMAC-SHA256 signing for real portfolio polling
-- Force-recall: cancel all orders + freeze credit line on max-loss breach
-- OKX CEX + OnchainOS MCP subprocess proxies (with simulation fallback)
-- ERC-4337 AgentTreasury Solidity contract with banker co-signature enforcement
-- CI pipeline: fmt → clippy → test → build → audit → deny
-- CodeRabbit AI review configured for safety-critical paths
-- OpenClaw + Ollama local testing config included
-
-### OKX integration
-
-Uses OKX Agent Trade Kit API (`clawbank` key, read + trade permissions).
-Credentials must be set via `.env` file (gitignored) — see `.env.example`.
-
 ## License
 
 MIT
