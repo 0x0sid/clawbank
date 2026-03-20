@@ -13,7 +13,7 @@
 - [x] `src/guardian.rs` — 6-check pipeline, check_credit_line is always first ✅ tested (10 unit + 7 integration)
 - [x] `src/mcp/skill.rs` — 8 tools over JSON-RPC stdio, all handlers wired ✅ tested (7 integration)
 - [x] `src/monitor.rs` — in-memory state store, portfolio + proposals ✅ builds, exercised by poller
-- [x] `src/dashboard.rs` — Axum HTTP + WebSocket + inline HTML ✅ builds, serves on :3030 ⚠️ not E2E tested with browser
+- [x] `src/dashboard.rs` — Axum HTTP + WebSocket + approve/reject UI ✅ builds, serves on :3030, interactive credit approval tested live
 - [x] `.github/workflows/ci.yml` — fmt → clippy → test → build → audit → deny → solhint ⚠️ not triggered yet (no PR opened)
 - [x] `.github/workflows/security.yml` — weekly cargo audit + cargo deny ⚠️ not triggered yet (scheduled)
 - [x] `.coderabbit.yaml` — AI review config with path-specific instructions ⚠️ not triggered yet (no PR opened)
@@ -54,11 +54,13 @@
 
 ### Known issues
 
-- ⚠️ OKX API key has **Read-only** permission — need **Trade** permission enabled on OKX for live execution
-- ⚠️ `OKX_PASSPHRASE` is empty in `.env` — must be filled in for HMAC signing to work
-- ⚠️ `okx-trade-mcp` and `onchainos-skills` not installed — CEX/DeFi trades are simulated
+- ✅ OKX API key has **Read + Trade** permission — live execution enabled
+- ✅ `OKX_PASSPHRASE` configured in `.env` — HMAC signing works
+- ✅ Dashboard credit approval/rejection tested live with real OKX trades
+- ✅ $1 trade cap enforced at PolicyConfig, Guardian, and MCP handler levels
+- ✅ Sell trades (reconversion to USDT) do not consume budget
+- ⚠️ `okx-trade-mcp` and `onchainos-skills` not installed — falls back to OKX REST API
 - ⚠️ CI workflows haven't been triggered yet — need to open a PR or push to trigger
-- ⚠️ Dashboard not E2E tested with a real browser session
 - ⚠️ Solidity contract not compiled — Foundry not installed
 
 ---
@@ -158,7 +160,7 @@ Agent calls `request_credit` with a full `CreditProposal`:
 | `repayment_trigger` | enum | When funds are returned |
 | `collateral` | Option | What the agent stakes to back the request |
 
-### Step 3 — Banker scores
+### Step 3 — Banker scores and queues for human approval
 
 Deterministic scoring model (not AI):
 
@@ -170,11 +172,17 @@ score = (
   collateral_quality* 0.15   // collateral quality if provided
 )
 
-score >= 6.0 -> approved (may reduce amount)
-score <  6.0 -> rejected with reason
+Recommended amount based on score:
+  score < 5.0  → 25% of requested
+  score < 6.0  → 50% of requested
+  score < 7.0  → 75% of requested
+  score >= 7.0 → 100% of requested
 ```
 
-On approval: `CreditLine` created in registry + `grantCredit()` called on contract.
+Proposal is queued as **pending** with the recommended amount. A human must
+approve or reject on the dashboard (`POST /api/credit/:id/approve` or `/reject`).
+
+On human approval: `CreditLine` created in registry + `grantCredit()` called on contract.
 
 ### Step 4 — Agent proposes trades
 
@@ -189,7 +197,13 @@ Guardian checks in order (all must pass):
 6. check_anomaly         suspicious proposal rate? escalating risk scores?
 ```
 
-If approved: amount deducted from `remaining_usd`. Trade forwarded to OKX MCP.
+If approved: amount deducted from `remaining_usd` (buys only — sells return
+capital to USDT and do not consume budget). Trade forwarded to OKX MCP.
+
+**$1 hard cap per trade** — enforced at three levels:
+1. `PolicyConfig.max_single_trade_usd = 1.0`
+2. Guardian `check_policy` rejects trades > $1
+3. MCP handler clamps `amount_usd` to `.min(1.0)`
 
 ### Step 5 — Monitor watches P&L
 
@@ -215,6 +229,9 @@ Agent calls `repay_credit`. Line marked `Repaid`. Reputation updated positively.
 
 ```rust
 pub async fn evaluate(&self, proposal: &CreditProposal) -> CreditDecision
+pub async fn approve_proposal(&self, proposal_id: Uuid) -> Result<CreditLine>
+pub async fn reject_proposal(&self, proposal_id: Uuid) -> Result<()>
+pub async fn get_pending_proposals(&self) -> Vec<PendingProposalInfo>
 pub async fn get_active_line(&self, agent_id: Uuid) -> Option<CreditLine>
 pub async fn deduct(&self, agent_id: Uuid, amount: f64) -> Result<()>
 pub async fn recall(&self, agent_id: Uuid, reason: String) -> Result<()>
@@ -223,6 +240,7 @@ pub async fn reputation(&self, agent_id: Uuid) -> AgentReputation
 ```
 
 Registry: `RwLock<HashMap<Uuid, CreditLine>>`. Read-heavy, write-rare.
+Pending proposals: `RwLock<HashMap<Uuid, PendingProposalInfo>>`.
 
 ### `src/guardian.rs`
 
@@ -239,10 +257,12 @@ In-memory state store. Production: back with Redis.
 
 ### `src/dashboard.rs`
 
-Three Axum routes:
-- `GET /` — inline HTML, no build step
+Six Axum routes:
+- `GET /` — inline HTML with interactive approve/reject UI, no build step
 - `GET /ws` — WebSocket live event stream
-- `GET /api/snapshot` — full state JSON
+- `GET /api/snapshot` — full state JSON (includes pending proposals)
+- `POST /api/credit/:id/approve` — approve a pending credit proposal
+- `POST /api/credit/:id/reject` — reject a pending credit proposal
 
 ### `src/execution/okx_cex.rs`
 
@@ -332,7 +352,9 @@ pub struct AgentReputation {
 New `DashboardEvent` variants:
 
 ```rust
+CreditProposalPending { proposal, score, recommended_usd },
 CreditApproved(CreditLine),
+CreditRejectedByHuman { proposal_id, agent_id },
 CreditRecalled { agent_id: Uuid, reason: String },
 CreditRepaid { agent_id: Uuid },
 BudgetUpdate { agent_id: Uuid, spent_usd: f64, remaining_usd: f64 },

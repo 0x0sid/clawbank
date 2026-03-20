@@ -210,8 +210,17 @@ pub enum DashboardEvent {
         balances: HashMap<String, f64>,
         timestamp: DateTime<Utc>,
     },
+    CreditProposalPending {
+        proposal: CreditProposal,
+        score: f64,
+        recommended_usd: f64,
+    },
     CreditApproved {
         credit_line: CreditLine,
+    },
+    CreditRejectedByHuman {
+        proposal_id: Uuid,
+        agent_id: Uuid,
     },
     CreditRecalled {
         agent_id: Uuid,
@@ -238,12 +247,22 @@ pub enum DashboardEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DashboardSnapshot {
     pub agents: Vec<Agent>,
+    pub pending_proposals: Vec<PendingProposalInfo>,
     pub active_credit_lines: Vec<CreditLine>,
     pub recent_proposals: Vec<TradeProposal>,
     pub recent_guardian_results: Vec<GuardianResult>,
     pub portfolio: HashMap<String, f64>,
     pub reputations: Vec<AgentReputation>,
     pub timestamp: DateTime<Utc>,
+}
+
+/// Info about a pending credit proposal awaiting human approval.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingProposalInfo {
+    pub proposal: CreditProposal,
+    pub score: f64,
+    pub recommended_usd: f64,
+    pub submitted_at: DateTime<Utc>,
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +379,7 @@ impl Default for PolicyConfig {
                 "ETH-USDT".to_string(),
                 "SOL-USDT".to_string(),
             ],
-            max_single_trade_usd: 10_000.0,
+            max_single_trade_usd: 1.0,
             min_confidence: 0.40,
             max_trades_per_hour: 20,
             whitelisted_contracts: Vec::new(),

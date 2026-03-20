@@ -11,15 +11,15 @@ use crate::types::DashboardEvent;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Path, State,
     },
     response::{Html, IntoResponse, Json},
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Shared state for dashboard handlers.
 #[derive(Clone)]
@@ -35,6 +35,8 @@ pub fn build_router(state: DashboardState) -> Router {
         .route("/", get(index_handler))
         .route("/ws", get(ws_handler))
         .route("/api/snapshot", get(snapshot_handler))
+        .route("/api/credit/:proposal_id/approve", post(approve_handler))
+        .route("/api/credit/:proposal_id/reject", post(reject_handler))
         .with_state(state)
 }
 
@@ -95,10 +97,63 @@ async fn handle_ws(mut socket: WebSocket, state: DashboardState) {
 /// Serve the full state snapshot as JSON.
 async fn snapshot_handler(State(state): State<DashboardState>) -> impl IntoResponse {
     let agents = state.banker.get_agents().await;
+    let pending = state.banker.get_pending_proposals().await;
     let lines = state.banker.get_active_lines().await;
     let reps = state.banker.get_reputations().await;
-    let snapshot = state.monitor.snapshot(agents, lines, reps).await;
+    let snapshot = state.monitor.snapshot(agents, pending, lines, reps).await;
     Json(snapshot)
+}
+
+/// Approve a pending credit proposal via dashboard.
+async fn approve_handler(
+    Path(proposal_id): Path<String>,
+    State(state): State<DashboardState>,
+) -> impl IntoResponse {
+    let id = match proposal_id.parse::<uuid::Uuid>() {
+        Ok(id) => id,
+        Err(_) => {
+            return Json(serde_json::json!({"error": "Invalid proposal ID"}));
+        }
+    };
+
+    match state.banker.approve_proposal(id, None).await {
+        Ok(credit_line) => {
+            info!(proposal_id = %id, "Credit proposal approved via dashboard");
+            Json(serde_json::json!({
+                "ok": true,
+                "credit_line_id": credit_line.id,
+                "approved_usd": credit_line.approved_usd,
+            }))
+        }
+        Err(e) => {
+            warn!(proposal_id = %id, error = %e, "Failed to approve proposal");
+            Json(serde_json::json!({"error": e.to_string()}))
+        }
+    }
+}
+
+/// Reject a pending credit proposal via dashboard.
+async fn reject_handler(
+    Path(proposal_id): Path<String>,
+    State(state): State<DashboardState>,
+) -> impl IntoResponse {
+    let id = match proposal_id.parse::<uuid::Uuid>() {
+        Ok(id) => id,
+        Err(_) => {
+            return Json(serde_json::json!({"error": "Invalid proposal ID"}));
+        }
+    };
+
+    match state.banker.reject_proposal(id).await {
+        Ok(()) => {
+            info!(proposal_id = %id, "Credit proposal rejected via dashboard");
+            Json(serde_json::json!({"ok": true}))
+        }
+        Err(e) => {
+            warn!(proposal_id = %id, error = %e, "Failed to reject proposal");
+            Json(serde_json::json!({"error": e.to_string()}))
+        }
+    }
 }
 
 /// Inline HTML for the dashboard — no build step required.
@@ -107,7 +162,7 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OpenClaw AI Bank — Dashboard</title>
+<title>OpenClaw AI Bank</title>
 <style>
   :root {
     --bg: #0a0e17; --surface: #111827; --border: #1f2937;
@@ -116,55 +171,26 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
     --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    background: var(--bg); color: var(--text); font-family: var(--font);
-    font-size: 14px; line-height: 1.5;
-  }
-  header {
-    background: var(--surface); border-bottom: 1px solid var(--border);
-    padding: 16px 24px; display: flex; align-items: center; gap: 16px;
-  }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; line-height: 1.5; }
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; gap: 16px; }
   header h1 { font-size: 18px; font-weight: 600; }
-  .status-dot {
-    width: 10px; height: 10px; border-radius: 50%;
-    background: var(--red); display: inline-block;
-  }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--red); display: inline-block; }
   .status-dot.connected { background: var(--green); }
-  .grid {
-    display: grid; grid-template-columns: 1fr 1fr;
-    gap: 16px; padding: 24px; max-width: 1400px; margin: 0 auto;
-  }
-  .panel {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 8px; padding: 16px; min-height: 200px;
-  }
-  .panel h2 {
-    font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em;
-    color: var(--muted); margin-bottom: 12px; font-weight: 600;
-  }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 24px; max-width: 1400px; margin: 0 auto; }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; min-height: 120px; }
+  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 12px; font-weight: 600; }
   .full-width { grid-column: 1 / -1; }
-  .event-list { max-height: 400px; overflow-y: auto; }
-  .event-item {
-    padding: 8px 12px; border-bottom: 1px solid var(--border);
-    font-size: 13px; font-family: 'Consolas', monospace;
-  }
+  .event-list { max-height: 350px; overflow-y: auto; }
+  .event-item { padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 13px; font-family: 'Consolas', monospace; }
   .event-item:last-child { border-bottom: none; }
-  .badge {
-    display: inline-block; padding: 2px 8px; border-radius: 4px;
-    font-size: 11px; font-weight: 600; text-transform: uppercase;
-  }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
   .badge.approved { background: rgba(16,185,129,0.2); color: var(--green); }
   .badge.rejected { background: rgba(239,68,68,0.2); color: var(--red); }
   .badge.active { background: rgba(59,130,246,0.2); color: var(--accent); }
+  .badge.pending { background: rgba(245,158,11,0.2); color: var(--yellow); }
   .badge.recalled { background: rgba(245,158,11,0.2); color: var(--yellow); }
-  .credit-bar {
-    height: 8px; border-radius: 4px; background: var(--border);
-    margin-top: 8px; overflow: hidden;
-  }
-  .credit-bar-fill {
-    height: 100%; border-radius: 4px; background: var(--accent);
-    transition: width 0.3s ease;
-  }
+  .credit-bar { height: 8px; border-radius: 4px; background: var(--border); margin-top: 8px; overflow: hidden; }
+  .credit-bar-fill { height: 100%; border-radius: 4px; background: var(--accent); transition: width 0.3s ease; }
   .stat { text-align: center; padding: 12px; }
   .stat-value { font-size: 24px; font-weight: 700; color: var(--accent); }
   .stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; }
@@ -173,6 +199,18 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
   th { text-align: left; color: var(--muted); font-weight: 600; padding: 8px; border-bottom: 1px solid var(--border); }
   td { padding: 8px; border-bottom: 1px solid var(--border); }
   .empty { color: var(--muted); font-style: italic; padding: 24px; text-align: center; }
+  .btn { padding: 6px 16px; border: none; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+  .btn:hover { filter: brightness(1.15); }
+  .btn-approve { background: var(--green); color: #fff; }
+  .btn-reject { background: var(--red); color: #fff; margin-left: 8px; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .proposal-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 12px; }
+  .proposal-card .score { font-size: 22px; font-weight: 700; float: right; }
+  .proposal-card .score.high { color: var(--green); }
+  .proposal-card .score.mid { color: var(--yellow); }
+  .proposal-card .score.low { color: var(--red); }
+  .proposal-card .meta { color: var(--muted); font-size: 12px; margin: 4px 0 10px; }
+  .proposal-card .actions { margin-top: 10px; }
 </style>
 </head>
 <body>
@@ -183,18 +221,23 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 </header>
 
 <div class="grid">
+  <div class="panel full-width">
+    <h2>Pending Budget Proposals (requires your approval)</h2>
+    <div id="pending-panel"><div class="empty">No pending proposals</div></div>
+  </div>
+
   <div class="panel">
     <h2>Agents</h2>
     <div id="agents-panel"><div class="empty">No agents registered</div></div>
   </div>
 
   <div class="panel">
-    <h2>Credit Lines</h2>
+    <h2>Active Credit Lines</h2>
     <div id="credit-panel"><div class="empty">No active credit lines</div></div>
   </div>
 
   <div class="panel">
-    <h2>Portfolio</h2>
+    <h2>Portfolio (OKX)</h2>
     <div id="portfolio-panel"><div class="empty">No portfolio data</div></div>
   </div>
 
@@ -221,24 +264,18 @@ let ws;
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(proto + '//' + location.host + '/ws');
-
   ws.onopen = () => {
     document.getElementById('ws-status').classList.add('connected');
     document.getElementById('ws-label').textContent = 'Connected';
     fetchSnapshot();
   };
-
   ws.onclose = () => {
     document.getElementById('ws-status').classList.remove('connected');
     document.getElementById('ws-label').textContent = 'Disconnected';
     setTimeout(connect, 3000);
   };
-
   ws.onmessage = (e) => {
-    try {
-      const event = JSON.parse(e.data);
-      handleEvent(event);
-    } catch (err) { console.error('Parse error:', err); }
+    try { handleEvent(JSON.parse(e.data)); } catch (err) { console.error('Parse error:', err); }
   };
 }
 
@@ -247,6 +284,7 @@ async function fetchSnapshot() {
     const r = await fetch('/api/snapshot');
     const snap = await r.json();
     renderAgents(snap.agents || []);
+    renderPending(snap.pending_proposals || []);
     renderCredits(snap.active_credit_lines || []);
     renderPortfolio(snap.portfolio || {});
   } catch (e) { console.error('Snapshot fetch failed:', e); }
@@ -256,7 +294,9 @@ function handleEvent(ev) {
   addEventItem(ev);
   switch (ev.type) {
     case 'AgentRegistered': fetchSnapshot(); break;
+    case 'CreditProposalPending': fetchSnapshot(); break;
     case 'CreditApproved': fetchSnapshot(); break;
+    case 'CreditRejectedByHuman': fetchSnapshot(); break;
     case 'CreditRecalled': state.recalls++; fetchSnapshot(); break;
     case 'CreditRepaid': fetchSnapshot(); break;
     case 'BudgetUpdate': fetchSnapshot(); break;
@@ -277,6 +317,8 @@ function addEventItem(ev) {
   if (ev.type === 'TradeExecuted') badge = '<span class="badge approved">executed</span>';
   else if (ev.type === 'TradeRejected') badge = '<span class="badge rejected">rejected</span>';
   else if (ev.type === 'CreditApproved') badge = '<span class="badge approved">credit approved</span>';
+  else if (ev.type === 'CreditProposalPending') badge = '<span class="badge pending">needs approval</span>';
+  else if (ev.type === 'CreditRejectedByHuman') badge = '<span class="badge rejected">credit rejected</span>';
   else if (ev.type === 'CreditRecalled') badge = '<span class="badge recalled">recalled</span>';
   else badge = '<span class="badge active">' + ev.type + '</span>';
   item.innerHTML = '<span style="color:var(--muted)">' + time + '</span> ' + badge + ' ' + summarize(ev);
@@ -287,8 +329,10 @@ function addEventItem(ev) {
 function summarize(ev) {
   if (ev.type === 'TradeExecuted') return ev.pair + ' ' + ev.side + ' $' + (ev.amount_usd||0).toFixed(2);
   if (ev.type === 'TradeRejected') return (ev.reason||'').substring(0, 80);
-  if (ev.type === 'CreditApproved') return 'Agent ' + (ev.credit_line?.agent_id||'').substring(0,8) + ' — $' + (ev.credit_line?.approved_usd||0).toFixed(2);
-  if (ev.type === 'CreditRecalled') return 'Agent ' + (ev.agent_id||'').substring(0,8) + ' — ' + (ev.reason||'');
+  if (ev.type === 'CreditApproved') return 'Agent ' + (ev.credit_line?.agent_id||'').substring(0,8) + ' $' + (ev.credit_line?.approved_usd||0).toFixed(2);
+  if (ev.type === 'CreditProposalPending') return 'Agent ' + (ev.proposal?.agent_id||'').substring(0,8) + ' requests $' + (ev.proposal?.requested_usd||0).toFixed(2) + ' (score: ' + (ev.score||0).toFixed(1) + ')';
+  if (ev.type === 'CreditRejectedByHuman') return 'Agent ' + (ev.agent_id||'').substring(0,8);
+  if (ev.type === 'CreditRecalled') return 'Agent ' + (ev.agent_id||'').substring(0,8) + ' ' + (ev.reason||'');
   if (ev.type === 'AgentRegistered') return (ev.agent?.name||'unknown');
   if (ev.type === 'BudgetUpdate') return 'Agent ' + (ev.agent_id||'').substring(0,8) + ' spent=$' + (ev.spent_usd||0).toFixed(2) + ' rem=$' + (ev.remaining_usd||0).toFixed(2);
   return JSON.stringify(ev).substring(0, 100);
@@ -298,7 +342,58 @@ function renderAgents(agents) {
   const el = document.getElementById('agents-panel');
   if (!agents.length) { el.innerHTML = '<div class="empty">No agents registered</div>'; return; }
   el.innerHTML = '<table><tr><th>ID</th><th>Name</th><th>Registered</th></tr>' +
-    agents.map(a => '<tr><td>' + a.id.substring(0,8) + '…</td><td>' + a.name + '</td><td>' + new Date(a.registered_at).toLocaleString() + '</td></tr>').join('') + '</table>';
+    agents.map(a => '<tr><td>' + a.id.substring(0,8) + '</td><td>' + a.name + '</td><td>' + new Date(a.registered_at).toLocaleTimeString() + '</td></tr>').join('') + '</table>';
+}
+
+function renderPending(proposals) {
+  const el = document.getElementById('pending-panel');
+  if (!proposals.length) { el.innerHTML = '<div class="empty">No pending proposals</div>'; return; }
+  el.innerHTML = proposals.map(p => {
+    const s = p.score;
+    const cls = s >= 7 ? 'high' : s >= 5 ? 'mid' : 'low';
+    const pid = p.proposal.id;
+    return '<div class="proposal-card">' +
+      '<div class="score ' + cls + '">' + s.toFixed(1) + '</div>' +
+      '<strong>Agent ' + p.proposal.agent_id.substring(0,8) + '</strong> ' +
+      '<span class="badge pending">pending</span>' +
+      '<div class="meta">' +
+        'Requested: <strong>$' + p.proposal.requested_usd.toFixed(2) + '</strong> | ' +
+        'Recommended: <strong>$' + p.recommended_usd.toFixed(2) + '</strong> | ' +
+        'Strategy: ' + (p.proposal.strategy||'').substring(0,60) + '<br>' +
+        'Pairs: ' + (p.proposal.allowed_pairs||[]).join(', ') + ' | ' +
+        'Max loss: $' + (p.proposal.max_loss_usd||0).toFixed(2) + ' | ' +
+        'Max single: $' + (p.proposal.max_single_trade_usd||0).toFixed(2) +
+      '</div>' +
+      '<div class="actions">' +
+        '<button class="btn btn-approve" onclick="approveCredit(\'' + pid + '\')">Approve ($' + p.recommended_usd.toFixed(2) + ')</button>' +
+        '<button class="btn btn-reject" onclick="rejectCredit(\'' + pid + '\')">Reject</button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+async function approveCredit(proposalId) {
+  const btns = document.querySelectorAll('.btn');
+  btns.forEach(b => b.disabled = true);
+  try {
+    const r = await fetch('/api/credit/' + proposalId + '/approve', { method: 'POST' });
+    const j = await r.json();
+    if (j.ok) { fetchSnapshot(); }
+    else { alert('Approve failed: ' + (j.error||'unknown')); }
+  } catch(e) { alert('Error: ' + e); }
+  btns.forEach(b => b.disabled = false);
+}
+
+async function rejectCredit(proposalId) {
+  const btns = document.querySelectorAll('.btn');
+  btns.forEach(b => b.disabled = true);
+  try {
+    const r = await fetch('/api/credit/' + proposalId + '/reject', { method: 'POST' });
+    const j = await r.json();
+    if (j.ok) { fetchSnapshot(); }
+    else { alert('Reject failed: ' + (j.error||'unknown')); }
+  } catch(e) { alert('Error: ' + e); }
+  btns.forEach(b => b.disabled = false);
 }
 
 function renderCredits(lines) {
@@ -307,17 +402,17 @@ function renderCredits(lines) {
   el.innerHTML = lines.map(l => {
     const pct = l.approved_usd > 0 ? ((l.spent_usd / l.approved_usd) * 100) : 0;
     return '<div style="margin-bottom:12px"><strong>Agent ' + l.agent_id.substring(0,8) + '</strong> <span class="badge active">' + l.status + '</span>' +
-      '<div style="color:var(--muted);font-size:12px">$' + l.spent_usd.toFixed(2) + ' / $' + l.approved_usd.toFixed(2) + ' — expires ' + new Date(l.expires_at).toLocaleString() + '</div>' +
+      '<div style="color:var(--muted);font-size:12px">$' + l.spent_usd.toFixed(2) + ' / $' + l.approved_usd.toFixed(2) + '</div>' +
       '<div class="credit-bar"><div class="credit-bar-fill" style="width:' + pct + '%"></div></div></div>';
   }).join('');
 }
 
 function renderPortfolio(p) {
   const el = document.getElementById('portfolio-panel');
-  const keys = Object.keys(p);
+  const keys = Object.keys(p).sort();
   if (!keys.length) { el.innerHTML = '<div class="empty">No portfolio data</div>'; return; }
   el.innerHTML = '<table><tr><th>Asset</th><th>Balance</th></tr>' +
-    keys.map(k => '<tr><td>' + k + '</td><td>' + p[k].toFixed(4) + '</td></tr>').join('') + '</table>';
+    keys.map(k => '<tr><td><strong>' + k + '</strong></td><td>' + Number(p[k]).toFixed(6) + '</td></tr>').join('') + '</table>';
 }
 
 function updateStats() {

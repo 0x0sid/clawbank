@@ -61,7 +61,8 @@ async fn main() {
         PolicyConfig::default(),
         tx.clone(),
     ));
-    let cex_executor = Arc::new(OkxCexExecutor::new());
+    let rest_client = Arc::new(OkxRestClient::new());
+    let cex_executor = Arc::new(OkxCexExecutor::with_rest_client(rest_client.clone()));
     let onchain_executor = Arc::new(OkxOnchainExecutor::new());
 
     // Try to start OKX executors (non-fatal if they fail)
@@ -128,7 +129,7 @@ async fn main() {
     let poller_monitor = Arc::clone(&monitor);
     let poller_banker = Arc::clone(&banker);
     let poller_tx = tx.clone();
-    let okx_rest = Arc::new(OkxRestClient::new());
+    let okx_rest = rest_client;
 
     let poller_task = tokio::spawn(async move {
         let interval_secs: u64 = std::env::var("RECALL_CHECK_INTERVAL_SECS")

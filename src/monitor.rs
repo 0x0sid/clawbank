@@ -4,7 +4,8 @@
 //! `DashboardSnapshot` for the API. Production: back with Redis.
 
 use crate::types::{
-    Agent, AgentReputation, CreditLine, DashboardSnapshot, GuardianResult, TradeProposal,
+    Agent, AgentReputation, CreditLine, DashboardSnapshot, GuardianResult, PendingProposalInfo,
+    TradeProposal,
 };
 use chrono::Utc;
 use std::collections::HashMap;
@@ -72,11 +73,13 @@ impl Monitor {
     pub async fn snapshot(
         &self,
         agents: Vec<Agent>,
+        pending_proposals: Vec<PendingProposalInfo>,
         active_credit_lines: Vec<CreditLine>,
         reputations: Vec<AgentReputation>,
     ) -> DashboardSnapshot {
         DashboardSnapshot {
             agents,
+            pending_proposals,
             active_credit_lines,
             recent_proposals: self.recent_proposals.read().await.clone(),
             recent_guardian_results: self.recent_results.read().await.clone(),

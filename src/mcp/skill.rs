@@ -499,7 +499,8 @@ async fn handle_propose_trade(
     let amount_usd = args
         .get("amount_usd")
         .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
+        .unwrap_or(0.0)
+        .min(1.0); // Hard cap: never exceed $1 per trade
     let confidence = args
         .get("confidence")
         .and_then(|v| v.as_f64())
@@ -582,13 +583,16 @@ async fn handle_propose_trade(
         );
     }
 
-    // Deduct from credit line
-    if let Err(e) = banker.deduct(agent_id, amount_usd).await {
-        return JsonRpcResponse::error(
-            req.id.clone(),
-            -32000,
-            format!("Credit deduction failed: {e}"),
-        );
+    // Deduct from credit line (buys only — sells reconvert to USDT, no spend)
+    let is_sell = proposal.side == TradeSide::Sell;
+    if !is_sell {
+        if let Err(e) = banker.deduct(agent_id, amount_usd).await {
+            return JsonRpcResponse::error(
+                req.id.clone(),
+                -32000,
+                format!("Credit deduction failed: {e}"),
+            );
+        }
     }
 
     // Execute trade via appropriate executor
@@ -623,10 +627,12 @@ async fn handle_propose_trade(
             )
         }
         Err(e) => {
-            warn!(proposal_id = %proposal.id, error = %e, "Trade execution failed — refunding credit");
-            // Refund the deducted amount so the agent doesn't lose budget
-            if let Err(refund_err) = banker.refund(agent_id, amount_usd).await {
-                error!(agent_id = %agent_id, error = %refund_err, "Failed to refund credit after execution failure");
+            warn!(proposal_id = %proposal.id, error = %e, "Trade execution failed");
+            // Refund the deducted amount so the agent doesn't lose budget (buys only)
+            if !is_sell {
+                if let Err(refund_err) = banker.refund(agent_id, amount_usd).await {
+                    error!(agent_id = %agent_id, error = %refund_err, "Failed to refund credit after execution failure");
+                }
             }
             JsonRpcResponse::error(
                 req.id.clone(),
@@ -682,7 +688,7 @@ async fn handle_list_proposals(
     monitor: &Arc<Monitor>,
 ) -> JsonRpcResponse {
     let snapshot = monitor
-        .snapshot(Vec::new(), Vec::new(), Vec::new())
+        .snapshot(Vec::new(), Vec::new(), Vec::new(), Vec::new())
         .await;
 
     JsonRpcResponse::success(

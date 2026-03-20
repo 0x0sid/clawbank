@@ -6,9 +6,10 @@ trade via OKX, and are monitored by a guardian. Written in Rust.
 ## What this does
 
 An MCP skill (JSON-RPC over stdio) that sits between OpenClaw agents and OKX.
-Agents must request a credit line before trading. Every trade proposal runs
+Agents must request a credit line before trading. Credit proposals require
+**human approval** on the dashboard before activation. Every trade proposal runs
 through a 6-check guardian before reaching OKX. A live WebSocket dashboard at `:3030`
-shows all activity in real time.
+shows all activity in real time and allows interactive credit decisions.
 
 Three concurrent tokio tasks in one binary:
 1. **MCP stdio loop** — stdin/stdout JSON-RPC (never pollute stdout with logs)
@@ -53,19 +54,43 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ```
 OpenClaw Agent(s) → MCP stdio (JSON-RPC 2.0)
-    → Banker (credit scoring, approval)
-    → Guardian (6-check risk verification)
-    → OKX Agent Trade Kit (CEX) / OKX OnchainOS (DeFi)
-    → Dashboard (live WebSocket at :3030)
+    → Banker (credit scoring, human approval queue)
+    → Dashboard (approve/reject pending proposals at :3030)
+    → Guardian (6-check risk verification, $1 hard cap)
+    → OKX Agent Trade Kit (CEX) / OKX REST fallback
+    → Dashboard (live WebSocket event stream)
 ```
+
+**Key constraints:**
+- **$1 hard cap per trade** — enforced at PolicyConfig, Guardian, and MCP handler
+- **Sell trades do not consume budget** — reconverting to USDT is capital return
+- **Human approval required** — credit proposals queue as pending until approved/rejected
+
+## Simulation
+
+```powershell
+# Run the agent simulation (registers, requests $1 credit, buy+sell BTC)
+powershell -ExecutionPolicy Bypass -File .\scripts\agent-sim.ps1
+# Then open http://localhost:3030 and click Approve or Reject
+```
+
+## Dashboard API
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/` | GET | Interactive dashboard with approve/reject UI |
+| `/ws` | GET | WebSocket live event stream |
+| `/api/snapshot` | GET | Full state JSON (includes pending proposals) |
+| `/api/credit/:id/approve` | POST | Approve a pending credit proposal |
+| `/api/credit/:id/reject` | POST | Reject a pending credit proposal |
 
 ## MCP tools
 
 | Tool | Description |
 |---|---|
 | `agent_register` | Register on startup |
-| `request_credit` | Submit credit proposal to Banker |
-| `propose_trade` | Submit trade for Guardian review + execution |
+| `request_credit` | Submit credit proposal to Banker (queued for human approval) |
+| `propose_trade` | Submit trade for Guardian review + execution (max $1) |
 | `repay_credit` | Signal repayment, close credit line |
 | `get_portfolio` | Read portfolio state |
 | `list_proposals` | Recent proposals with guardian results |

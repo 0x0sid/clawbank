@@ -190,6 +190,104 @@ impl OkxRestClient {
         Ok(())
     }
 
+    /// Place a spot market order on OKX.
+    ///
+    /// `inst_id` — instrument like "BTC-USDT"
+    /// `side` — "buy" or "sell"
+    /// `amount_usd` — dollar amount to spend (for buys, uses tgtCcy=quote_ccy)
+    pub async fn place_market_order(
+        &self,
+        inst_id: &str,
+        side: &str,
+        amount_usd: f64,
+    ) -> Result<serde_json::Value, AppError> {
+        let creds = match &self.credentials {
+            Some(c) => c,
+            None => {
+                return Err(AppError::OkxError(
+                    "Cannot place order — no OKX credentials".to_string(),
+                ))
+            }
+        };
+
+        let path = "/api/v5/trade/order";
+        let body_json = serde_json::json!({
+            "instId": inst_id,
+            "tdMode": "cash",
+            "side": side,
+            "ordType": "market",
+            "sz": format!("{:.2}", amount_usd),
+            "tgtCcy": "quote_ccy"
+        });
+        let body_str = serde_json::to_string(&body_json)
+            .map_err(|e| AppError::OkxError(format!("Serialize error: {e}")))?;
+
+        let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+        let sign = self.sign(creds, &timestamp, "POST", path, &body_str)?;
+
+        let resp = self
+            .client
+            .post(format!("{OKX_BASE_URL}{path}"))
+            .header("OK-ACCESS-KEY", &creds.api_key)
+            .header("OK-ACCESS-SIGN", &sign)
+            .header("OK-ACCESS-TIMESTAMP", &timestamp)
+            .header("OK-ACCESS-PASSPHRASE", &creds.passphrase)
+            .header("Content-Type", "application/json")
+            .body(body_str)
+            .send()
+            .await
+            .map_err(|e| AppError::OkxError(format!("Place order request failed: {e}")))?;
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::OkxError(format!("Place order response parse failed: {e}")))?;
+
+        let code = body
+            .get("code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+
+        if code != "0" {
+            let msg = body.get("msg").and_then(|v| v.as_str()).unwrap_or("");
+            let detail = body
+                .get("data")
+                .and_then(|d| d.as_array())
+                .and_then(|a| a.first())
+                .and_then(|d| d.get("sMsg"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            error!(
+                inst_id = %inst_id,
+                code = %code,
+                msg = %msg,
+                detail = %detail,
+                "OKX place order failed"
+            );
+            return Err(AppError::OkxError(format!(
+                "OKX order failed: code={code} msg={msg} detail={detail}"
+            )));
+        }
+
+        let order_id = body
+            .get("data")
+            .and_then(|d| d.as_array())
+            .and_then(|a| a.first())
+            .and_then(|d| d.get("ordId"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        info!(
+            inst_id = %inst_id,
+            side = %side,
+            amount_usd = amount_usd,
+            order_id = %order_id,
+            "OKX market order placed successfully"
+        );
+
+        Ok(body)
+    }
+
     /// Get open positions for P&L tracking.
     pub async fn get_positions(&self) -> Result<Vec<OkxPosition>, AppError> {
         let creds = match &self.credentials {

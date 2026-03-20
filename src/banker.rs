@@ -6,7 +6,7 @@
 use crate::execution::treasury::TreasuryClient;
 use crate::types::{
     Agent, AgentReputation, ApprovedConditions, CreditDecision, CreditLine, CreditProposal,
-    CreditStatus, DashboardEvent,
+    CreditStatus, DashboardEvent, PendingProposalInfo,
 };
 use chrono::Utc;
 use std::collections::HashMap;
@@ -23,6 +23,8 @@ pub struct Banker {
     reputations: Arc<RwLock<HashMap<Uuid, AgentReputation>>>,
     /// Registered agents, keyed by agent ID.
     agents: Arc<RwLock<HashMap<Uuid, Agent>>>,
+    /// Pending credit proposals awaiting human approval, keyed by proposal ID.
+    pending_proposals: Arc<RwLock<HashMap<Uuid, PendingProposalInfo>>>,
     /// Dashboard event broadcaster.
     tx: broadcast::Sender<DashboardEvent>,
     /// On-chain treasury client (None = stub mode, used in tests).
@@ -38,6 +40,7 @@ impl Banker {
             credit_lines: Arc::new(RwLock::new(HashMap::new())),
             reputations: Arc::new(RwLock::new(HashMap::new())),
             agents: Arc::new(RwLock::new(HashMap::new())),
+            pending_proposals: Arc::new(RwLock::new(HashMap::new())),
             tx,
             treasury: None,
         }
@@ -49,6 +52,7 @@ impl Banker {
             credit_lines: Arc::new(RwLock::new(HashMap::new())),
             reputations: Arc::new(RwLock::new(HashMap::new())),
             agents: Arc::new(RwLock::new(HashMap::new())),
+            pending_proposals: Arc::new(RwLock::new(HashMap::new())),
             tx,
             treasury: Some(treasury),
         }
@@ -82,7 +86,7 @@ impl Banker {
         self.agents.read().await.contains_key(&agent_id)
     }
 
-    /// Evaluate a credit proposal using deterministic scoring. Not AI — pure math.
+    /// Evaluate a credit proposal — scores it and queues for human approval.
     ///
     /// Scoring formula:
     /// ```text
@@ -92,62 +96,97 @@ impl Banker {
     ///   agent_reputation  * 0.30
     ///   collateral_quality* 0.15
     /// )
-    /// score >= 6.0 -> approved (may reduce amount)
-    /// score <  6.0 -> rejected with reason
     /// ```
+    /// Returns a pending decision — human must approve or reject on the dashboard.
     pub async fn evaluate(&self, proposal: &CreditProposal) -> CreditDecision {
         let reputation = self.reputation(proposal.agent_id).await;
         let score = self.compute_score(proposal, &reputation);
+
+        // Compute recommended amount based on score
+        let recommended_usd = if score < 5.0 {
+            proposal.requested_usd * 0.25
+        } else if score < 6.0 {
+            proposal.requested_usd * 0.50
+        } else if score < 7.0 {
+            proposal.requested_usd * 0.75
+        } else {
+            proposal.requested_usd
+        };
 
         info!(
             proposal_id = %proposal.id,
             agent_id = %proposal.agent_id,
             score = score,
-            "Credit proposal scored"
+            recommended_usd = recommended_usd,
+            "Credit proposal scored — awaiting human approval"
         );
 
-        if score < 6.0 {
-            let reason = self.rejection_reason(proposal, score, &reputation);
-            warn!(
-                proposal_id = %proposal.id,
-                score = score,
-                reason = %reason,
-                "Credit proposal rejected"
-            );
-            return CreditDecision {
-                proposal_id: proposal.id,
-                approved: false,
-                approved_usd: None,
-                rejection_reason: Some(reason),
-                score,
-                credit_line: None,
-            };
-        }
-
-        // May reduce amount for borderline scores
-        let approved_usd = if score < 7.0 {
-            proposal.requested_usd * 0.75
-        } else if score < 8.0 {
-            proposal.requested_usd * 0.90
-        } else {
-            proposal.requested_usd
+        // Store as pending
+        let pending = PendingProposalInfo {
+            proposal: proposal.clone(),
+            score,
+            recommended_usd,
+            submitted_at: Utc::now(),
         };
+        self.pending_proposals
+            .write()
+            .await
+            .insert(proposal.id, pending);
+
+        // Notify dashboard
+        let _ = self.tx.send(DashboardEvent::CreditProposalPending {
+            proposal: proposal.clone(),
+            score,
+            recommended_usd,
+        });
+
+        CreditDecision {
+            proposal_id: proposal.id,
+            approved: false,
+            approved_usd: Some(recommended_usd),
+            rejection_reason: Some(format!(
+                "Pending human approval (score: {score:.1}, recommended: ${recommended_usd:.2})"
+            )),
+            score,
+            credit_line: None,
+        }
+    }
+
+    /// Approve a pending credit proposal (called from dashboard).
+    pub async fn approve_proposal(
+        &self,
+        proposal_id: Uuid,
+        approved_usd: Option<f64>,
+    ) -> Result<CreditLine, crate::types::AppError> {
+        let pending = self
+            .pending_proposals
+            .write()
+            .await
+            .remove(&proposal_id)
+            .ok_or_else(|| {
+                crate::types::AppError::Internal(format!(
+                    "Proposal {proposal_id} not found in pending queue"
+                ))
+            })?;
+
+        let reputation = self.reputation(pending.proposal.agent_id).await;
+        let final_usd = approved_usd.unwrap_or(pending.recommended_usd);
 
         let credit_line = CreditLine {
             id: Uuid::new_v4(),
-            proposal_id: proposal.id,
-            agent_id: proposal.agent_id,
-            approved_usd,
+            proposal_id,
+            agent_id: pending.proposal.agent_id,
+            approved_usd: final_usd,
             spent_usd: 0.0,
-            remaining_usd: approved_usd,
+            remaining_usd: final_usd,
             status: CreditStatus::Active,
             approved_at: Utc::now(),
-            expires_at: proposal.window_end,
+            expires_at: pending.proposal.window_end,
             conditions: ApprovedConditions {
-                allowed_pairs: proposal.allowed_pairs.clone(),
-                max_single_trade_usd: proposal.max_single_trade_usd,
-                max_loss_usd: proposal.max_loss_usd,
-                window_end: proposal.window_end,
+                allowed_pairs: pending.proposal.allowed_pairs.clone(),
+                max_single_trade_usd: pending.proposal.max_single_trade_usd,
+                max_loss_usd: pending.proposal.max_loss_usd,
+                window_end: pending.proposal.window_end,
             },
             reputation_at_approval: reputation.score,
         };
@@ -156,26 +195,33 @@ impl Banker {
         self.credit_lines
             .write()
             .await
-            .insert(proposal.agent_id, credit_line.clone());
+            .insert(pending.proposal.agent_id, credit_line.clone());
 
         // Update reputation: lines_approved
-        if let Some(rep) = self.reputations.write().await.get_mut(&proposal.agent_id) {
+        if let Some(rep) = self
+            .reputations
+            .write()
+            .await
+            .get_mut(&pending.proposal.agent_id)
+        {
             rep.lines_approved += 1;
         }
 
         info!(
             credit_line_id = %credit_line.id,
-            approved_usd = approved_usd,
-            "Credit line granted"
+            proposal_id = %proposal_id,
+            approved_usd = final_usd,
+            "Credit line granted (human approved)"
         );
 
         // On-chain: call grantCredit on AgentTreasury contract
         if let Some(ref treasury) = self.treasury {
-            // TODO(week3): Map agent UUID to EVM address via a registry.
-            // For now, use the agent_id hex as a placeholder address.
-            let agent_addr = format!("0x{}", proposal.agent_id.simple());
-            if let Err(e) = treasury.grant_credit(&agent_addr, approved_usd, proposal.window_end).await {
-                error!(agent_id = %proposal.agent_id, error = %e, "On-chain grantCredit failed");
+            let agent_addr = format!("0x{}", pending.proposal.agent_id.simple());
+            if let Err(e) = treasury
+                .grant_credit(&agent_addr, final_usd, pending.proposal.window_end)
+                .await
+            {
+                error!(agent_id = %pending.proposal.agent_id, error = %e, "On-chain grantCredit failed");
             }
         }
 
@@ -183,14 +229,47 @@ impl Banker {
             credit_line: credit_line.clone(),
         });
 
-        CreditDecision {
-            proposal_id: proposal.id,
-            approved: true,
-            approved_usd: Some(approved_usd),
-            rejection_reason: None,
-            score,
-            credit_line: Some(credit_line),
-        }
+        Ok(credit_line)
+    }
+
+    /// Reject a pending credit proposal (called from dashboard).
+    pub async fn reject_proposal(
+        &self,
+        proposal_id: Uuid,
+    ) -> Result<(), crate::types::AppError> {
+        let pending = self
+            .pending_proposals
+            .write()
+            .await
+            .remove(&proposal_id)
+            .ok_or_else(|| {
+                crate::types::AppError::Internal(format!(
+                    "Proposal {proposal_id} not found in pending queue"
+                ))
+            })?;
+
+        warn!(
+            proposal_id = %proposal_id,
+            agent_id = %pending.proposal.agent_id,
+            "Credit proposal rejected by human"
+        );
+
+        let _ = self.tx.send(DashboardEvent::CreditRejectedByHuman {
+            proposal_id,
+            agent_id: pending.proposal.agent_id,
+        });
+
+        Ok(())
+    }
+
+    /// Get all pending proposals awaiting human approval.
+    pub async fn get_pending_proposals(&self) -> Vec<PendingProposalInfo> {
+        self.pending_proposals
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// Get the active credit line for an agent, if any.
@@ -490,6 +569,7 @@ impl Banker {
     }
 
     /// Generate a human-readable rejection reason.
+    #[allow(dead_code)]
     fn rejection_reason(
         &self,
         proposal: &CreditProposal,

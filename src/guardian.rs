@@ -216,8 +216,10 @@ impl Guardian {
             };
         }
 
-        // Amount must be within remaining budget
-        if proposal.amount_usd > line.remaining_usd {
+        // Amount must be within remaining budget (buys only — sells return capital to USDT)
+        if proposal.side != crate::types::TradeSide::Sell
+            && proposal.amount_usd > line.remaining_usd
+        {
             return CheckResult {
                 name: "check_credit_line".to_string(),
                 passed: false,

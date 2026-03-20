@@ -10,9 +10,10 @@ trade via OKX, and are monitored by a guardian. Written in Rust.
 ## What this repo does
 
 An MCP skill (JSON-RPC over stdio) that sits between OpenClaw agents and OKX.
-Agents must request a credit line before trading. Every trade proposal runs
-through a guardian before reaching OKX. A live WebSocket dashboard at :3030
-shows all activity in real time.
+Agents must request a credit line before trading. Credit proposals require
+**human approval** on the dashboard before activation. Every trade proposal
+runs through a guardian before reaching OKX. A live WebSocket dashboard at
+:3030 shows all activity in real time and allows interactive credit decisions.
 
 Three concurrent tokio tasks in one binary:
 1. MCP stdio loop (stdin/stdout — never pollute stdout with logs)
@@ -71,6 +72,12 @@ RUST_LOG             optional   Log level (default info)
   first check in `guardian.rs`. Do not reorder.
 - **Banker has write access to credit lines. Guardian has read only.**
   Never give the guardian write access to `CreditLine`.
+- **Human approval required for credit.** `evaluate()` queues proposals
+  as pending. Dashboard `/api/credit/:id/approve` or `/reject` finalizes.
+- **$1 hard cap per trade.** Enforced in PolicyConfig, Guardian check 2,
+  and MCP handler. Do not raise without explicit decision.
+- **Sell trades do not consume budget.** Selling back to USDT is capital
+  return, not spending. Guardian and banker skip deduction on sells.
 - **No private keys in agent runtime.** OKX credentials live in
   `~/.okx/config` (managed by `okx config init`). Banker key in env var only.
 
@@ -82,10 +89,10 @@ RUST_LOG             optional   Log level (default info)
 src/
   main.rs           entrypoint, spawns 3 tokio tasks
   types.rs          all shared types
-  banker.rs         credit line registry, scoring, force-recall
+  banker.rs         credit line registry, scoring, human approval queue
   guardian.rs       6-check risk verification
   monitor.rs        in-memory state store
-  dashboard.rs      Axum HTTP + WebSocket + inline HTML
+  dashboard.rs      Axum HTTP + WebSocket + approve/reject UI
   execution/
     okx_cex.rs      OKX Agent Trade Kit MCP proxy
     okx_onchain.rs  OKX OnchainOS skills proxy
@@ -95,6 +102,8 @@ src/
     skill.rs        JSON-RPC over stdio
 contracts/
   AgentTreasury.sol ERC-4337 treasury with credit enforcement
+scripts/
+  agent-sim.ps1   PowerShell simulation: register, credit, buy+sell $1 BTC
 tests/
   guardian_tests.rs
   banker_tests.rs

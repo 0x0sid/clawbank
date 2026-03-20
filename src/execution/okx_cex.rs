@@ -3,8 +3,10 @@
 //! Handles CEX operations: spot, perps, options, grid bots, algo orders.
 //! Keys never touch our code — OKX handles signing via `okx-trade-mcp`.
 
+use crate::execution::okx_rest::OkxRestClient;
 use crate::types::{AppError, TradeProposal, TradeSide};
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -14,6 +16,8 @@ use tracing::{info, warn};
 pub struct OkxCexExecutor {
     /// The MCP subprocess handle, if spawned.
     process: Mutex<Option<Child>>,
+    /// REST client fallback for placing real orders when MCP subprocess unavailable.
+    rest_client: Option<Arc<OkxRestClient>>,
 }
 
 impl Default for OkxCexExecutor {
@@ -27,6 +31,15 @@ impl OkxCexExecutor {
     pub fn new() -> Self {
         Self {
             process: Mutex::new(None),
+            rest_client: None,
+        }
+    }
+
+    /// Create with a REST client fallback for live trading without okx-trade-mcp.
+    pub fn with_rest_client(rest_client: Arc<OkxRestClient>) -> Self {
+        Self {
+            process: Mutex::new(None),
+            rest_client: Some(rest_client),
         }
     }
 
@@ -128,8 +141,65 @@ impl OkxCexExecutor {
             ));
         }
 
-        // Subprocess not running — simulate the trade
+        // Subprocess not running — try REST API fallback
+        if let Some(ref rest) = self.rest_client {
+            return self.execute_via_rest(rest, proposal).await;
+        }
+
+        // No REST client either — simulate
         self.simulate(proposal).await
+    }
+
+    /// Execute a trade via the OKX REST API (fallback when MCP subprocess unavailable).
+    async fn execute_via_rest(
+        &self,
+        rest: &OkxRestClient,
+        proposal: &TradeProposal,
+    ) -> Result<serde_json::Value, AppError> {
+        let side_str = match proposal.side {
+            TradeSide::Buy => "buy",
+            TradeSide::Sell => "sell",
+        };
+
+        info!(
+            proposal_id = %proposal.id,
+            pair = %proposal.pair,
+            side = %side_str,
+            amount_usd = proposal.amount_usd,
+            "Executing trade via OKX REST API (fallback)"
+        );
+
+        let okx_result = rest
+            .place_market_order(&proposal.pair, side_str, proposal.amount_usd)
+            .await?;
+
+        let order_id = okx_result
+            .get("data")
+            .and_then(|d| d.as_array())
+            .and_then(|a| a.first())
+            .and_then(|d| d.get("ordId"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        info!(
+            proposal_id = %proposal.id,
+            pair = %proposal.pair,
+            order_id = %order_id,
+            "Trade executed via OKX REST API"
+        );
+
+        Ok(serde_json::json!({
+            "simulated": false,
+            "live": true,
+            "proposal_id": proposal.id,
+            "pair": proposal.pair,
+            "side": side_str,
+            "amount_usd": proposal.amount_usd,
+            "order_id": order_id,
+            "status": "filled",
+            "message": "Order placed via OKX REST API"
+        }))
     }
 
     /// Simulate a trade when OKX subprocess is not available.
