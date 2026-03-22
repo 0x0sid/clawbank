@@ -52,6 +52,18 @@
 - [ ] Cross-agent collision detection (two agents on same pair simultaneously)
 - [ ] Solidity audit (Foundry + Slither + manual review)
 
+### x402 integration
+
+- [ ] `src/execution/x402.rs` — x402 payment interceptor + risk classifier
+- [ ] `X402PaymentRequest` type in `types.rs` (recipient, amount, currency, purpose, service_url)
+- [ ] `X402Verdict` and `X402RiskLevel` enums in `types.rs`
+- [ ] Guardian hook: intercept x402 before payment signature is released
+- [ ] Dashboard: "Pending x402 Payments" panel with approve/block buttons
+- [ ] Dashboard events: `X402PaymentPending`, `X402PaymentApproved`, `X402PaymentBlocked`
+- [ ] Recipient blocklist / allowlist in `PolicyConfig`
+- [ ] x402 payment deducts from credit line budget (same as buy trades)
+- [ ] Tests: known recipient auto-approve, unknown flags, blocklisted auto-blocks
+
 ### Known issues
 
 - ✅ OKX API key has **Read + Trade** permission — live execution enabled
@@ -124,6 +136,20 @@ On-chain (EVM / ERC-4337):
 |   - Credit ceiling check      |
 |   - Time window check         |
 |   - Cumulative spend check    |
++-------------------------------+
+
+x402 payment interception:
++-------------------------------+
+|   x402 Handler (guardian)     |
+|   Agent sends HTTP request    |
+|   → Server returns 402        |
+|   → Guardian intercepts:      |
+|     - Recipient address check |
+|     - Amount within policy?   |
+|     - Purpose legitimate?     |
+|   → Dashboard flags suspect   |
+|   → Human approves/blocks     |
+|   → Payment signature released|
 +-------------------------------+
 ```
 
@@ -217,6 +243,30 @@ FORCE RECALL:
 4. Block all future proposals until new credit line approved
 ```
 
+### Step 5b — x402 payment interception
+
+When an agent encounters an HTTP 402 (Payment Required) response from an
+external service, the guardian intercepts the payment before signing:
+
+```
+1. Agent hits API → gets 402 with payment instructions
+2. Guardian inspects x402 payment details:
+   - Recipient address: known? on a blocklist? first-time?
+   - Amount: within credit line budget? within policy cap?
+   - Purpose: matches agent's declared strategy?
+   - Service: is the API the agent claims to need?
+3. Risk classification:
+   ✅ LOW  — known recipient, small amount, matches strategy → auto-approve
+   ⚠️ MED  — first-time recipient or unusual amount → dashboard alert
+   🚫 HIGH — blocklisted address, exceeds budget, off-strategy → auto-block
+4. Dashboard shows x402 payment alert with full context
+5. Human approves → payment signature released to facilitator
+   Human rejects → payment blocked, agent notified
+```
+
+This prevents agents from draining funds to unknown addresses under
+the guise of "paying for an API service".
+
 ### Step 6 — Repay
 
 Agent calls `repay_credit`. Line marked `Repaid`. Reputation updated positively.
@@ -271,6 +321,28 @@ Proxy to `okx-trade-mcp` subprocess. Spot, perps, options, grid bots.
 ### `src/execution/okx_onchain.rs`
 
 Proxy to `onchainos-skills`. Flow: get quote -> simulate -> co-sign -> broadcast -> track.
+
+### `src/execution/x402.rs`
+
+x402 payment interception and legitimacy screening. When an agent attempts
+an HTTP 402 payment flow:
+
+```rust
+pub async fn intercept_x402(
+    payment: &X402PaymentRequest,
+    credit_line: &CreditLine,
+    policy: &PolicyConfig,
+) -> X402Verdict
+
+pub fn classify_risk(payment: &X402PaymentRequest) -> X402RiskLevel
+```
+
+Risk classification:
+- **Low** — known recipient, amount ≤ $1, matches declared strategy → auto-approve
+- **Medium** — first-time recipient, unusual amount → flag on dashboard for human review
+- **High** — blocklisted address, exceeds budget, off-strategy → auto-block
+
+Dashboard events: `X402PaymentPending`, `X402PaymentApproved`, `X402PaymentBlocked`.
 
 ---
 
@@ -358,6 +430,9 @@ CreditRejectedByHuman { proposal_id, agent_id },
 CreditRecalled { agent_id: Uuid, reason: String },
 CreditRepaid { agent_id: Uuid },
 BudgetUpdate { agent_id: Uuid, spent_usd: f64, remaining_usd: f64 },
+X402PaymentPending { payment: X402PaymentRequest, risk: X402RiskLevel },
+X402PaymentApproved { payment_id: Uuid, agent_id: Uuid },
+X402PaymentBlocked { payment_id: Uuid, agent_id: Uuid, reason: String },
 ```
 
 ---

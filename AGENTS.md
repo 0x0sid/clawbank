@@ -78,6 +78,10 @@ RUST_LOG             optional   Log level (default info)
   and MCP handler. Do not raise without explicit decision.
 - **Sell trades do not consume budget.** Selling back to USDT is capital
   return, not spending. Guardian and banker skip deduction on sells.
+- **x402 payments intercepted by guardian.** When an agent attempts an
+  x402 payment (HTTP 402 flow), the guardian inspects recipient, amount,
+  and purpose. Suspicious transfers are flagged on the dashboard for human
+  review before the payment signature is released.
 - **No private keys in agent runtime.** OKX credentials live in
   `~/.okx/config` (managed by `okx config init`). Banker key in env var only.
 
@@ -98,6 +102,7 @@ src/
     okx_onchain.rs  OKX OnchainOS skills proxy
     okx_rest.rs     OKX REST client with HMAC-SHA256 signing
     treasury.rs     On-chain AgentTreasury contract client
+    x402.rs         x402 payment interception + legitimacy screening
   mcp/
     skill.rs        JSON-RPC over stdio
 contracts/
