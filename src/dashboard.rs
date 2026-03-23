@@ -37,6 +37,8 @@ pub fn build_router(state: DashboardState) -> Router {
         .route("/api/snapshot", get(snapshot_handler))
         .route("/api/credit/:proposal_id/approve", post(approve_handler))
         .route("/api/credit/:proposal_id/reject", post(reject_handler))
+        .route("/api/x402/:payment_id/approve", post(x402_approve_handler))
+        .route("/api/x402/:payment_id/block", post(x402_block_handler))
         .with_state(state)
 }
 
@@ -100,7 +102,11 @@ async fn snapshot_handler(State(state): State<DashboardState>) -> impl IntoRespo
     let pending = state.banker.get_pending_proposals().await;
     let lines = state.banker.get_active_lines().await;
     let reps = state.banker.get_reputations().await;
-    let snapshot = state.monitor.snapshot(agents, pending, lines, reps).await;
+    let pending_x402 = state.banker.get_pending_x402().await;
+    let snapshot = state
+        .monitor
+        .snapshot(agents, pending, pending_x402, lines, reps)
+        .await;
     Json(snapshot)
 }
 
@@ -151,6 +157,58 @@ async fn reject_handler(
         }
         Err(e) => {
             warn!(proposal_id = %id, error = %e, "Failed to reject proposal");
+            Json(serde_json::json!({"error": e.to_string()}))
+        }
+    }
+}
+
+/// Approve a pending x402 payment via dashboard.
+async fn x402_approve_handler(
+    Path(payment_id): Path<String>,
+    State(state): State<DashboardState>,
+) -> impl IntoResponse {
+    let id = match payment_id.parse::<uuid::Uuid>() {
+        Ok(id) => id,
+        Err(_) => {
+            return Json(serde_json::json!({"error": "Invalid payment ID"}));
+        }
+    };
+
+    match state.banker.approve_x402(id).await {
+        Ok(()) => {
+            info!(payment_id = %id, "x402 payment approved via dashboard");
+            Json(serde_json::json!({"ok": true}))
+        }
+        Err(e) => {
+            warn!(payment_id = %id, error = %e, "Failed to approve x402 payment");
+            Json(serde_json::json!({"error": e.to_string()}))
+        }
+    }
+}
+
+/// Block a pending x402 payment via dashboard.
+async fn x402_block_handler(
+    Path(payment_id): Path<String>,
+    State(state): State<DashboardState>,
+) -> impl IntoResponse {
+    let id = match payment_id.parse::<uuid::Uuid>() {
+        Ok(id) => id,
+        Err(_) => {
+            return Json(serde_json::json!({"error": "Invalid payment ID"}));
+        }
+    };
+
+    match state
+        .banker
+        .block_x402(id, "Blocked by human via dashboard".to_string())
+        .await
+    {
+        Ok(()) => {
+            info!(payment_id = %id, "x402 payment blocked via dashboard");
+            Json(serde_json::json!({"ok": true}))
+        }
+        Err(e) => {
+            warn!(payment_id = %id, error = %e, "Failed to block x402 payment");
             Json(serde_json::json!({"error": e.to_string()}))
         }
     }
@@ -226,6 +284,11 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
     <div id="pending-panel"><div class="empty">No pending proposals</div></div>
   </div>
 
+  <div class="panel full-width">
+    <h2>Pending x402 Payments (requires your review)</h2>
+    <div id="x402-panel"><div class="empty">No pending x402 payments</div></div>
+  </div>
+
   <div class="panel">
     <h2>Agents</h2>
     <div id="agents-panel"><div class="empty">No agents registered</div></div>
@@ -285,6 +348,7 @@ async function fetchSnapshot() {
     const snap = await r.json();
     renderAgents(snap.agents || []);
     renderPending(snap.pending_proposals || []);
+    renderX402(snap.pending_x402_payments || []);
     renderCredits(snap.active_credit_lines || []);
     renderPortfolio(snap.portfolio || {});
   } catch (e) { console.error('Snapshot fetch failed:', e); }
@@ -302,6 +366,9 @@ function handleEvent(ev) {
     case 'BudgetUpdate': fetchSnapshot(); break;
     case 'TradeExecuted': state.trades++; state.approved++; break;
     case 'TradeRejected': state.trades++; state.rejected++; break;
+    case 'X402PaymentPending': fetchSnapshot(); break;
+    case 'X402PaymentApproved': fetchSnapshot(); break;
+    case 'X402PaymentBlocked': fetchSnapshot(); break;
     case 'PortfolioUpdate': renderPortfolio(ev.balances || {}); break;
   }
   updateStats();
@@ -335,6 +402,9 @@ function summarize(ev) {
   if (ev.type === 'CreditRecalled') return 'Agent ' + (ev.agent_id||'').substring(0,8) + ' ' + (ev.reason||'');
   if (ev.type === 'AgentRegistered') return (ev.agent?.name||'unknown');
   if (ev.type === 'BudgetUpdate') return 'Agent ' + (ev.agent_id||'').substring(0,8) + ' spent=$' + (ev.spent_usd||0).toFixed(2) + ' rem=$' + (ev.remaining_usd||0).toFixed(2);
+  if (ev.type === 'X402PaymentPending') return 'Agent ' + (ev.payment?.agent_id||'').substring(0,8) + ' $' + (ev.payment?.amount_usd||0).toFixed(2) + ' to ' + (ev.payment?.recipient||'').substring(0,12) + ' [' + (ev.risk||'') + ']';
+  if (ev.type === 'X402PaymentApproved') return 'Payment ' + (ev.payment_id||'').substring(0,8) + ' approved';
+  if (ev.type === 'X402PaymentBlocked') return 'Payment ' + (ev.payment_id||'').substring(0,8) + ' blocked: ' + (ev.reason||'');
   return JSON.stringify(ev).substring(0, 100);
 }
 
@@ -392,6 +462,57 @@ async function rejectCredit(proposalId) {
     const j = await r.json();
     if (j.ok) { fetchSnapshot(); }
     else { alert('Reject failed: ' + (j.error||'unknown')); }
+  } catch(e) { alert('Error: ' + e); }
+  btns.forEach(b => b.disabled = false);
+}
+
+function renderX402(payments) {
+  const el = document.getElementById('x402-panel');
+  if (!payments.length) { el.innerHTML = '<div class="empty">No pending x402 payments</div>'; return; }
+  el.innerHTML = payments.map(p => {
+    const risk = p.risk_level;
+    const cls = risk === 'High' ? 'low' : risk === 'Medium' ? 'mid' : 'high';
+    const badge_cls = risk === 'High' ? 'rejected' : risk === 'Medium' ? 'pending' : 'approved';
+    const pid = p.payment.id;
+    return '<div class="proposal-card">' +
+      '<div class="score ' + cls + '">' + risk + '</div>' +
+      '<strong>Agent ' + p.payment.agent_id.substring(0,8) + '</strong> ' +
+      '<span class="badge ' + badge_cls + '">x402 ' + risk + ' risk</span>' +
+      '<div class="meta">' +
+        'Recipient: <strong>' + p.payment.recipient + '</strong><br>' +
+        'Amount: <strong>$' + p.payment.amount_usd.toFixed(2) + ' ' + p.payment.currency + '</strong> | ' +
+        'Service: ' + (p.payment.service_url||'') + '<br>' +
+        'Purpose: ' + (p.payment.purpose||'') + '<br>' +
+        'Reason: <em>' + (p.reason||'') + '</em>' +
+      '</div>' +
+      '<div class="actions">' +
+        '<button class="btn btn-approve" onclick="approveX402(\'' + pid + '\')">Approve Payment</button>' +
+        '<button class="btn btn-reject" onclick="blockX402(\'' + pid + '\')">Block Payment</button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+async function approveX402(paymentId) {
+  const btns = document.querySelectorAll('.btn');
+  btns.forEach(b => b.disabled = true);
+  try {
+    const r = await fetch('/api/x402/' + paymentId + '/approve', { method: 'POST' });
+    const j = await r.json();
+    if (j.ok) { fetchSnapshot(); }
+    else { alert('Approve failed: ' + (j.error||'unknown')); }
+  } catch(e) { alert('Error: ' + e); }
+  btns.forEach(b => b.disabled = false);
+}
+
+async function blockX402(paymentId) {
+  const btns = document.querySelectorAll('.btn');
+  btns.forEach(b => b.disabled = true);
+  try {
+    const r = await fetch('/api/x402/' + paymentId + '/block', { method: 'POST' });
+    const j = await r.json();
+    if (j.ok) { fetchSnapshot(); }
+    else { alert('Block failed: ' + (j.error||'unknown')); }
   } catch(e) { alert('Error: ' + e); }
   btns.forEach(b => b.disabled = false);
 }

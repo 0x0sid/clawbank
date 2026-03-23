@@ -56,6 +56,8 @@ OKX_PASSPHRASE       required   OKX passphrase
 OKX_ONCHAIN_API_KEY  optional   OKX OnchainOS key (for DeFi)
 BANKER_KEY           optional   Treasury co-signing private key
 TREASURY_ADDRESS     optional   Deployed AgentTreasury contract address
+TREASURY_RPC_URL     optional   EVM JSON-RPC endpoint (default https://sepolia.base.org)
+TREASURY_CHAIN_ID    optional   Chain ID (default 84532 for Base Sepolia)
 DASHBOARD_PORT       optional   Dashboard port (default 3030)
 RUST_LOG             optional   Log level (default info)
 ```
@@ -101,7 +103,7 @@ src/
     okx_cex.rs      OKX Agent Trade Kit MCP proxy
     okx_onchain.rs  OKX OnchainOS skills proxy
     okx_rest.rs     OKX REST client with HMAC-SHA256 signing
-    treasury.rs     On-chain AgentTreasury contract client
+    treasury.rs     On-chain AgentTreasury contract client (alloy)
     x402.rs         x402 payment interception + legitimacy screening
   mcp/
     skill.rs        JSON-RPC over stdio
@@ -113,6 +115,7 @@ tests/
   guardian_tests.rs
   banker_tests.rs
   mcp_tests.rs
+  x402_tests.rs
 ```
 
 ---
@@ -158,6 +161,7 @@ CodeRabbit reviews every PR automatically — see `.coderabbit.yaml`.
 | `uuid` | Proposal and credit line IDs |
 | `chrono` | Timestamps and time windows |
 | `tracing` | Structured logging (to stderr) |
+| `alloy` | Ethereum ABI encoding, tx signing, JSON-RPC (Base Sepolia) |
 
 ---
 

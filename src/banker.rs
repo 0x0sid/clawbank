@@ -6,7 +6,8 @@
 use crate::execution::treasury::TreasuryClient;
 use crate::types::{
     Agent, AgentReputation, ApprovedConditions, CreditDecision, CreditLine, CreditProposal,
-    CreditStatus, DashboardEvent, PendingProposalInfo,
+    CreditStatus, DashboardEvent, PendingProposalInfo, PendingX402Payment, X402PaymentRequest,
+    X402RiskLevel,
 };
 use chrono::Utc;
 use std::collections::HashMap;
@@ -25,6 +26,8 @@ pub struct Banker {
     agents: Arc<RwLock<HashMap<Uuid, Agent>>>,
     /// Pending credit proposals awaiting human approval, keyed by proposal ID.
     pending_proposals: Arc<RwLock<HashMap<Uuid, PendingProposalInfo>>>,
+    /// Pending x402 payments awaiting human review, keyed by payment ID.
+    pending_x402: Arc<RwLock<HashMap<Uuid, PendingX402Payment>>>,
     /// Dashboard event broadcaster.
     tx: broadcast::Sender<DashboardEvent>,
     /// On-chain treasury client (None = stub mode, used in tests).
@@ -41,18 +44,23 @@ impl Banker {
             reputations: Arc::new(RwLock::new(HashMap::new())),
             agents: Arc::new(RwLock::new(HashMap::new())),
             pending_proposals: Arc::new(RwLock::new(HashMap::new())),
+            pending_x402: Arc::new(RwLock::new(HashMap::new())),
             tx,
             treasury: None,
         }
     }
 
     /// Create a Banker with an on-chain treasury client for production use.
-    pub fn with_treasury(tx: broadcast::Sender<DashboardEvent>, treasury: Arc<TreasuryClient>) -> Self {
+    pub fn with_treasury(
+        tx: broadcast::Sender<DashboardEvent>,
+        treasury: Arc<TreasuryClient>,
+    ) -> Self {
         Self {
             credit_lines: Arc::new(RwLock::new(HashMap::new())),
             reputations: Arc::new(RwLock::new(HashMap::new())),
             agents: Arc::new(RwLock::new(HashMap::new())),
             pending_proposals: Arc::new(RwLock::new(HashMap::new())),
+            pending_x402: Arc::new(RwLock::new(HashMap::new())),
             tx,
             treasury: Some(treasury),
         }
@@ -69,7 +77,10 @@ impl Banker {
         self.agents.write().await.insert(agent.id, agent.clone());
 
         // Initialize reputation for new agent
-        let rep = AgentReputation { agent_id: agent.id, ..Default::default() };
+        let rep = AgentReputation {
+            agent_id: agent.id,
+            ..Default::default()
+        };
         self.reputations.write().await.insert(agent.id, rep);
 
         info!(agent_id = %agent.id, name = %name, "Agent registered");
@@ -233,10 +244,7 @@ impl Banker {
     }
 
     /// Reject a pending credit proposal (called from dashboard).
-    pub async fn reject_proposal(
-        &self,
-        proposal_id: Uuid,
-    ) -> Result<(), crate::types::AppError> {
+    pub async fn reject_proposal(&self, proposal_id: Uuid) -> Result<(), crate::types::AppError> {
         let pending = self
             .pending_proposals
             .write()
@@ -330,11 +338,7 @@ impl Banker {
 
     /// Refund a previously deducted amount back to the credit line.
     /// Used when trade execution fails after deduction to prevent budget leaks.
-    pub async fn refund(
-        &self,
-        agent_id: Uuid,
-        amount: f64,
-    ) -> Result<(), crate::types::AppError> {
+    pub async fn refund(&self, agent_id: Uuid, amount: f64) -> Result<(), crate::types::AppError> {
         let mut lines = self.credit_lines.write().await;
         let line = lines
             .get_mut(&agent_id)
@@ -393,10 +397,9 @@ impl Banker {
             }
         }
 
-        let _ = self.tx.send(DashboardEvent::CreditRecalled {
-            agent_id,
-            reason,
-        });
+        let _ = self
+            .tx
+            .send(DashboardEvent::CreditRecalled { agent_id, reason });
 
         Ok(())
     }
@@ -441,8 +444,9 @@ impl Banker {
             .await
             .get(&agent_id)
             .cloned()
-            .unwrap_or_else(|| {
-                AgentReputation { agent_id, ..Default::default() }
+            .unwrap_or_else(|| AgentReputation {
+                agent_id,
+                ..Default::default()
             })
     }
 
@@ -467,9 +471,108 @@ impl Banker {
         self.reputations.read().await.values().cloned().collect()
     }
 
+    /// Store a pending x402 payment for human review.
+    pub async fn store_pending_x402(
+        &self,
+        payment: X402PaymentRequest,
+        risk_level: X402RiskLevel,
+        reason: String,
+    ) {
+        let pending = PendingX402Payment {
+            payment: payment.clone(),
+            risk_level: risk_level.clone(),
+            reason: reason.clone(),
+        };
+        self.pending_x402.write().await.insert(payment.id, pending);
+
+        let _ = self.tx.send(DashboardEvent::X402PaymentPending {
+            payment,
+            risk: risk_level,
+            reason,
+        });
+    }
+
+    /// Approve a pending x402 payment. Deducts from credit line.
+    pub async fn approve_x402(&self, payment_id: Uuid) -> Result<(), crate::types::AppError> {
+        let pending = self
+            .pending_x402
+            .write()
+            .await
+            .remove(&payment_id)
+            .ok_or_else(|| {
+                crate::types::AppError::Internal(format!(
+                    "x402 payment {payment_id} not found in pending"
+                ))
+            })?;
+
+        let agent_id = pending.payment.agent_id;
+
+        // Deduct from credit line
+        self.deduct(agent_id, pending.payment.amount_usd).await?;
+
+        info!(
+            payment_id = %payment_id,
+            agent_id = %agent_id,
+            amount_usd = pending.payment.amount_usd,
+            "x402 payment approved — budget deducted"
+        );
+
+        let _ = self.tx.send(DashboardEvent::X402PaymentApproved {
+            payment_id,
+            agent_id,
+        });
+
+        Ok(())
+    }
+
+    /// Block a pending x402 payment.
+    pub async fn block_x402(
+        &self,
+        payment_id: Uuid,
+        reason: String,
+    ) -> Result<(), crate::types::AppError> {
+        let pending = self
+            .pending_x402
+            .write()
+            .await
+            .remove(&payment_id)
+            .ok_or_else(|| {
+                crate::types::AppError::Internal(format!(
+                    "x402 payment {payment_id} not found in pending"
+                ))
+            })?;
+
+        let agent_id = pending.payment.agent_id;
+
+        warn!(
+            payment_id = %payment_id,
+            agent_id = %agent_id,
+            reason = %reason,
+            "x402 payment blocked by human"
+        );
+
+        let _ = self.tx.send(DashboardEvent::X402PaymentBlocked {
+            payment_id,
+            agent_id,
+            reason,
+        });
+
+        Ok(())
+    }
+
+    /// Get all pending x402 payments awaiting human review.
+    pub async fn get_pending_x402(&self) -> Vec<PendingX402Payment> {
+        self.pending_x402.read().await.values().cloned().collect()
+    }
+
     /// Shared read-only handle to credit lines (for guardian).
     pub fn credit_lines_read(&self) -> Arc<RwLock<HashMap<Uuid, CreditLine>>> {
         Arc::clone(&self.credit_lines)
+    }
+
+    /// Reference to the dashboard event broadcaster.
+    pub fn tx_ref(&self) -> &broadcast::Sender<DashboardEvent> {
+        &self.tx
     }
 
     // -----------------------------------------------------------------------
@@ -597,10 +700,7 @@ impl Banker {
         if reasons.is_empty() {
             format!("Overall score {score:.2} below threshold 6.0")
         } else {
-            format!(
-                "Score {score:.2}/10.0 — {}",
-                reasons.join("; ")
-            )
+            format!("Score {score:.2}/10.0 — {}", reasons.join("; "))
         }
     }
 }
@@ -669,9 +769,15 @@ mod tests {
         let agent = banker.register_agent("good-agent".to_string()).await;
         let proposal = good_proposal(agent.id);
         let decision = banker.evaluate(&proposal).await;
-        assert!(decision.approved);
-        assert!(decision.approved_usd.is_some());
+        // evaluate() queues as pending — not auto-approved
+        assert!(!decision.approved);
         assert!(decision.score >= 6.0);
+        // Human approves via dashboard
+        let credit_line = banker
+            .approve_proposal(proposal.id, None)
+            .await
+            .expect("approve");
+        assert!(credit_line.approved_usd > 0.0);
     }
 
     #[tokio::test]
@@ -690,11 +796,16 @@ mod tests {
         let banker = Banker::new(make_tx());
         let agent = banker.register_agent("deduct-agent".to_string()).await;
         let proposal = good_proposal(agent.id);
-        let decision = banker.evaluate(&proposal).await;
-        assert!(decision.approved);
+        banker.evaluate(&proposal).await;
+        let credit_line = banker
+            .approve_proposal(proposal.id, None)
+            .await
+            .expect("approve");
 
-        let approved = decision.approved_usd.expect("approved");
-        banker.deduct(agent.id, approved * 0.5).await.expect("deduct");
+        banker
+            .deduct(agent.id, credit_line.approved_usd * 0.5)
+            .await
+            .expect("deduct");
 
         let line = banker.get_active_line(agent.id).await.expect("line");
         assert!(line.spent_usd > 0.0);
@@ -709,6 +820,10 @@ mod tests {
         let agent = banker.register_agent("recall-agent".to_string()).await;
         let proposal = good_proposal(agent.id);
         banker.evaluate(&proposal).await;
+        banker
+            .approve_proposal(proposal.id, None)
+            .await
+            .expect("approve");
 
         banker
             .recall(agent.id, "max loss exceeded".to_string())

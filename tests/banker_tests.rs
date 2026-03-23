@@ -1,8 +1,8 @@
 //! Integration tests for the Banker module.
 
-use openclaw_aibank::types::*;
-use openclaw_aibank::banker::Banker;
 use chrono::{Duration, Utc};
+use openclaw_aibank::banker::Banker;
+use openclaw_aibank::types::*;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -48,10 +48,15 @@ async fn banker_approve_good_proposal() {
     let proposal = good_proposal(agent.id);
     let decision = banker.evaluate(&proposal).await;
 
-    assert!(decision.approved);
+    // evaluate() queues as pending — not auto-approved
+    assert!(!decision.approved);
     assert!(decision.score >= 6.0);
-    assert!(decision.approved_usd.is_some());
-    assert!(decision.credit_line.is_some());
+    // Human approves via dashboard
+    let credit_line = banker
+        .approve_proposal(proposal.id, None)
+        .await
+        .expect("approve");
+    assert!(credit_line.approved_usd > 0.0);
 }
 
 #[tokio::test]
@@ -86,11 +91,15 @@ async fn banker_deduct_insufficient_credit() {
     let banker = Banker::new(make_tx());
     let agent = banker.register_agent("deduct-test".to_string()).await;
     let proposal = good_proposal(agent.id);
-    let decision = banker.evaluate(&proposal).await;
-    assert!(decision.approved);
+    banker.evaluate(&proposal).await;
+    let credit_line = banker
+        .approve_proposal(proposal.id, None)
+        .await
+        .expect("approve");
 
-    let approved = decision.approved_usd.unwrap();
-    let result = banker.deduct(agent.id, approved + 1.0).await;
+    let result = banker
+        .deduct(agent.id, credit_line.approved_usd + 1.0)
+        .await;
     assert!(result.is_err());
 }
 
@@ -101,6 +110,10 @@ async fn banker_recall_updates_reputation() {
 
     let proposal = good_proposal(agent.id);
     banker.evaluate(&proposal).await;
+    banker
+        .approve_proposal(proposal.id, None)
+        .await
+        .expect("approve");
 
     let rep_before = banker.reputation(agent.id).await;
     banker
@@ -119,8 +132,11 @@ async fn banker_repay_updates_reputation_positively() {
     let agent = banker.register_agent("repay-test".to_string()).await;
 
     let proposal = good_proposal(agent.id);
-    let decision = banker.evaluate(&proposal).await;
-    assert!(decision.approved);
+    banker.evaluate(&proposal).await;
+    banker
+        .approve_proposal(proposal.id, None)
+        .await
+        .expect("approve");
 
     let rep_before = banker.reputation(agent.id).await;
     banker.repay(agent.id).await.unwrap();
@@ -144,18 +160,24 @@ async fn banker_refund_restores_budget() {
     let banker = Banker::new(make_tx());
     let agent = banker.register_agent("refund-test".to_string()).await;
     let proposal = good_proposal(agent.id);
-    let decision = banker.evaluate(&proposal).await;
-    assert!(decision.approved);
+    banker.evaluate(&proposal).await;
+    banker
+        .approve_proposal(proposal.id, None)
+        .await
+        .expect("approve");
 
     let line_before = banker.get_active_line(agent.id).await.unwrap();
 
     // Deduct some amount
-    banker.deduct(agent.id, 1_000.0).await.unwrap();
+    let deduct_amt = 0.50;
+    banker.deduct(agent.id, deduct_amt).await.unwrap();
     let line_after_deduct = banker.get_active_line(agent.id).await.unwrap();
-    assert!((line_after_deduct.remaining_usd - (line_before.remaining_usd - 1_000.0)).abs() < 0.01);
+    assert!(
+        (line_after_deduct.remaining_usd - (line_before.remaining_usd - deduct_amt)).abs() < 0.01
+    );
 
     // Refund it
-    banker.refund(agent.id, 1_000.0).await.unwrap();
+    banker.refund(agent.id, deduct_amt).await.unwrap();
     let line_after_refund = banker.get_active_line(agent.id).await.unwrap();
     assert!((line_after_refund.remaining_usd - line_before.remaining_usd).abs() < 0.01);
     assert!((line_after_refund.spent_usd - line_before.spent_usd).abs() < 0.01);
@@ -170,10 +192,12 @@ async fn banker_expired_line_returns_none() {
     let mut proposal = good_proposal(agent.id);
     proposal.window_end = Utc::now() - Duration::seconds(1);
 
-    let decision = banker.evaluate(&proposal).await;
-    // The line may be approved but with an already-past expiry
-    if decision.approved {
-        // get_active_line should return None and mark it Expired
-        assert!(banker.get_active_line(agent.id).await.is_none());
-    }
+    banker.evaluate(&proposal).await;
+    // Approve the proposal (it has an already-past expiry)
+    let _credit_line = banker
+        .approve_proposal(proposal.id, None)
+        .await
+        .expect("approve");
+    // get_active_line should return None and mark it Expired
+    assert!(banker.get_active_line(agent.id).await.is_none());
 }

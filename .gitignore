@@ -45,6 +45,9 @@ yarn-error.log*
 lib/
 cache/
 out/
+foundry-deploy/lib/
+foundry-deploy/cache/
+foundry-deploy/out/
 
 # Test coverage
 tarpaulin-report.html

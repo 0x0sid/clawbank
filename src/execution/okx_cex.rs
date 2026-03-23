@@ -97,15 +97,16 @@ impl OkxCexExecutor {
                 }
             });
 
-            let request_str = serde_json::to_string(&request)
-                .map_err(AppError::SerdeError)?;
+            let request_str = serde_json::to_string(&request).map_err(AppError::SerdeError)?;
 
             // Write to subprocess stdin
             if let Some(stdin) = child.stdin.as_mut() {
                 stdin
                     .write_all(format!("{request_str}\n").as_bytes())
                     .await
-                    .map_err(|e| AppError::ExecutionFailed(format!("Failed to write to okx-trade-mcp: {e}")))?;
+                    .map_err(|e| {
+                        AppError::ExecutionFailed(format!("Failed to write to okx-trade-mcp: {e}"))
+                    })?;
 
                 stdin.flush().await.map_err(|e| {
                     AppError::ExecutionFailed(format!("Failed to flush okx-trade-mcp stdin: {e}"))

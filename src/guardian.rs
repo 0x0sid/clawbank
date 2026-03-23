@@ -375,9 +375,7 @@ impl Guardian {
 
         // Method must be safe
         if let Some(method) = &proposal.contract_method {
-            if !self.policy.safe_methods.is_empty()
-                && !self.policy.safe_methods.contains(method)
-            {
+            if !self.policy.safe_methods.is_empty() && !self.policy.safe_methods.contains(method) {
                 return CheckResult {
                     name: "check_contract_safety".to_string(),
                     passed: false,
@@ -427,8 +425,7 @@ impl Guardian {
                     passed: false,
                     detail: format!(
                         "Cumulative risk score {:.1} exceeds threshold {:.1}",
-                        agent_activity.cumulative_risk_score,
-                        self.policy.max_cumulative_risk_score
+                        agent_activity.cumulative_risk_score, self.policy.max_cumulative_risk_score
                     ),
                 };
             }
@@ -445,7 +442,7 @@ impl Guardian {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{CreditLine, CreditStatus, ApprovedConditions, TradeSide};
+    use crate::types::{ApprovedConditions, CreditLine, CreditStatus, TradeSide};
     use chrono::Duration;
 
     fn make_tx() -> broadcast::Sender<DashboardEvent> {
@@ -458,16 +455,16 @@ mod tests {
             id: Uuid::new_v4(),
             proposal_id: Uuid::new_v4(),
             agent_id,
-            approved_usd: 10_000.0,
+            approved_usd: 5.0,
             spent_usd: 0.0,
-            remaining_usd: 10_000.0,
+            remaining_usd: 5.0,
             status: CreditStatus::Active,
             approved_at: Utc::now(),
             expires_at: Utc::now() + Duration::hours(24),
             conditions: ApprovedConditions {
                 allowed_pairs: vec!["BTC-USDT".to_string(), "ETH-USDT".to_string()],
-                max_single_trade_usd: 5_000.0,
-                max_loss_usd: 2_000.0,
+                max_single_trade_usd: 1.0,
+                max_loss_usd: 3.0,
                 window_end: Utc::now() + Duration::hours(24),
             },
             reputation_at_approval: 5.0,
@@ -481,7 +478,7 @@ mod tests {
             submitted_at: Utc::now(),
             pair: "BTC-USDT".to_string(),
             side: TradeSide::Buy,
-            amount_usd: 1_000.0,
+            amount_usd: 0.50,
             confidence: 0.75,
             reasoning: "RSI oversold on 4h timeframe".to_string(),
             contract_address: None,
@@ -562,12 +559,12 @@ mod tests {
         let agent_id = Uuid::new_v4();
         let credit_lines = Arc::new(RwLock::new(HashMap::new()));
         let mut line = make_credit_line(agent_id);
-        line.remaining_usd = 500.0;
+        line.remaining_usd = 0.30;
         credit_lines.write().await.insert(agent_id, line);
 
         let guardian = Guardian::new(credit_lines, PolicyConfig::default(), make_tx());
         let mut proposal = make_good_proposal(agent_id);
-        proposal.amount_usd = 1_000.0; // exceeds remaining $500
+        proposal.amount_usd = 0.50; // exceeds remaining $0.30
 
         let result = guardian.verify(&proposal).await.expect("verify");
         assert!(!result.approved);

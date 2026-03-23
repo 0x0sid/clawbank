@@ -132,7 +132,10 @@ impl OkxRestClient {
             }
         }
 
-        info!(assets = balances.len(), "Portfolio balances fetched from OKX");
+        info!(
+            assets = balances.len(),
+            "Portfolio balances fetched from OKX"
+        );
         Ok(balances)
     }
 
@@ -171,10 +174,7 @@ impl OkxRestClient {
 
         let status = resp.status();
         if !status.is_success() {
-            let body: serde_json::Value = resp
-                .json()
-                .await
-                .unwrap_or(serde_json::Value::Null);
+            let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
             error!(
                 inst_id = %inst_id,
                 status = %status,
@@ -243,10 +243,7 @@ impl OkxRestClient {
             .await
             .map_err(|e| AppError::OkxError(format!("Place order response parse failed: {e}")))?;
 
-        let code = body
-            .get("code")
-            .and_then(|v| v.as_str())
-            .unwrap_or("?");
+        let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("?");
 
         if code != "0" {
             let msg = body.get("msg").and_then(|v| v.as_str()).unwrap_or("");

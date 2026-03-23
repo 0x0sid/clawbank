@@ -178,6 +178,52 @@ pub struct CheckResult {
 }
 
 // ---------------------------------------------------------------------------
+// x402 payment interception
+// ---------------------------------------------------------------------------
+
+/// An x402 payment request intercepted from an agent's HTTP 402 flow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct X402PaymentRequest {
+    pub id: Uuid,
+    pub agent_id: Uuid,
+    pub recipient: String,
+    pub amount_usd: f64,
+    pub currency: String,
+    pub service_url: String,
+    pub purpose: String,
+    pub submitted_at: DateTime<Utc>,
+}
+
+/// Risk classification for an x402 payment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum X402RiskLevel {
+    /// Known recipient, small amount, matches strategy — auto-approve.
+    Low,
+    /// First-time recipient or unusual amount — dashboard alert for human review.
+    Medium,
+    /// Blocklisted address, exceeds budget, off-strategy — auto-block.
+    High,
+}
+
+/// Guardian's verdict on an x402 payment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct X402Verdict {
+    pub payment_id: Uuid,
+    pub approved: bool,
+    pub risk_level: X402RiskLevel,
+    pub reason: String,
+    pub needs_human_review: bool,
+}
+
+/// A pending x402 payment awaiting human review on the dashboard.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingX402Payment {
+    pub payment: X402PaymentRequest,
+    pub risk_level: X402RiskLevel,
+    pub reason: String,
+}
+
+// ---------------------------------------------------------------------------
 // Dashboard events
 // ---------------------------------------------------------------------------
 
@@ -234,6 +280,20 @@ pub enum DashboardEvent {
         spent_usd: f64,
         remaining_usd: f64,
     },
+    X402PaymentPending {
+        payment: X402PaymentRequest,
+        risk: X402RiskLevel,
+        reason: String,
+    },
+    X402PaymentApproved {
+        payment_id: Uuid,
+        agent_id: Uuid,
+    },
+    X402PaymentBlocked {
+        payment_id: Uuid,
+        agent_id: Uuid,
+        reason: String,
+    },
     Error {
         message: String,
     },
@@ -248,6 +308,7 @@ pub enum DashboardEvent {
 pub struct DashboardSnapshot {
     pub agents: Vec<Agent>,
     pub pending_proposals: Vec<PendingProposalInfo>,
+    pub pending_x402_payments: Vec<PendingX402Payment>,
     pub active_credit_lines: Vec<CreditLine>,
     pub recent_proposals: Vec<TradeProposal>,
     pub recent_guardian_results: Vec<GuardianResult>,
@@ -369,6 +430,12 @@ pub struct PolicyConfig {
     pub max_proposals_per_minute: u32,
     /// Anomaly detection: max cumulative risk score before flagging.
     pub max_cumulative_risk_score: f64,
+    /// x402: known-good recipient addresses (auto-approve on Low risk).
+    pub x402_allowed_recipients: Vec<String>,
+    /// x402: blocklisted recipient addresses (auto-block on High risk).
+    pub x402_blocked_recipients: Vec<String>,
+    /// x402: max USD per single x402 payment.
+    pub x402_max_payment_usd: f64,
 }
 
 impl Default for PolicyConfig {
@@ -390,6 +457,9 @@ impl Default for PolicyConfig {
             ],
             max_proposals_per_minute: 10,
             max_cumulative_risk_score: 50.0,
+            x402_allowed_recipients: Vec::new(),
+            x402_blocked_recipients: Vec::new(),
+            x402_max_payment_usd: 1.0,
         }
     }
 }
@@ -431,4 +501,10 @@ pub enum AppError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("x402 payment blocked: {0}")]
+    X402Blocked(String),
+
+    #[error("x402 payment pending human review: {0}")]
+    X402PendingReview(String),
 }

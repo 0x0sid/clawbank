@@ -16,11 +16,12 @@
 use crate::banker::Banker;
 use crate::execution::okx_cex::OkxCexExecutor;
 use crate::execution::okx_onchain::OkxOnchainExecutor;
+use crate::execution::x402 as x402_interceptor;
 use crate::guardian::Guardian;
 use crate::monitor::Monitor;
 use crate::types::{
     CreditProposal, DashboardEvent, JsonRpcRequest, JsonRpcResponse, McpManifest, McpTool,
-    RepaymentTrigger, TradeSide, TradeProposal,
+    PolicyConfig, RepaymentTrigger, TradeProposal, TradeSide, X402PaymentRequest,
 };
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
@@ -141,6 +142,22 @@ pub fn build_manifest() -> McpManifest {
                     "required": ["agent_id"]
                 }),
             },
+            McpTool {
+                name: "submit_x402_payment".to_string(),
+                description: "Submit an x402 payment for guardian review. Suspicious payments require human approval.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "agent_id": { "type": "string" },
+                        "recipient": { "type": "string", "description": "Recipient address (0x...)" },
+                        "amount_usd": { "type": "number" },
+                        "currency": { "type": "string", "default": "USDC" },
+                        "service_url": { "type": "string", "description": "URL of the service requesting payment" },
+                        "purpose": { "type": "string", "description": "What the payment is for" }
+                    },
+                    "required": ["agent_id", "recipient", "amount_usd", "service_url", "purpose"]
+                }),
+            },
         ],
     }
 }
@@ -209,9 +226,8 @@ async fn write_response(
     stdout: &mut io::Stdout,
     response: &JsonRpcResponse,
 ) -> Result<(), std::io::Error> {
-    let json = serde_json::to_string(response).map_err(|e| {
-        std::io::Error::other(format!("Serialize error: {e}"))
-    })?;
+    let json = serde_json::to_string(response)
+        .map_err(|e| std::io::Error::other(format!("Serialize error: {e}")))?;
     stdout.write_all(json.as_bytes()).await?;
     stdout.write_all(b"\n").await?;
     stdout.flush().await?;
@@ -247,12 +263,8 @@ async fn handle_request(
                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
 
             match tool_name {
-                Some("agent_register") => {
-                    handle_agent_register(request, banker, &arguments).await
-                }
-                Some("request_credit") => {
-                    handle_request_credit(request, banker, &arguments).await
-                }
+                Some("agent_register") => handle_agent_register(request, banker, &arguments).await,
+                Some("request_credit") => handle_request_credit(request, banker, &arguments).await,
                 Some("propose_trade") => {
                     handle_propose_trade(
                         request,
@@ -266,16 +278,15 @@ async fn handle_request(
                     )
                     .await
                 }
-                Some("repay_credit") => {
-                    handle_repay_credit(request, banker, &arguments).await
-                }
+                Some("repay_credit") => handle_repay_credit(request, banker, &arguments).await,
                 Some("get_portfolio") => handle_get_portfolio(request, monitor).await,
                 Some("list_proposals") => handle_list_proposals(request, monitor).await,
-                Some("get_risk_score") => {
-                    handle_get_risk_score(request, banker, &arguments).await
-                }
+                Some("get_risk_score") => handle_get_risk_score(request, banker, &arguments).await,
                 Some("get_credit_line") => {
                     handle_get_credit_line(request, banker, &arguments).await
+                }
+                Some("submit_x402_payment") => {
+                    handle_submit_x402(request, banker, &arguments).await
                 }
                 Some(name) => JsonRpcResponse::error(
                     request.id.clone(),
@@ -542,11 +553,7 @@ async fn handle_propose_trade(
     let guardian_result = match guardian.verify(&proposal).await {
         Ok(r) => r,
         Err(e) => {
-            return JsonRpcResponse::error(
-                req.id.clone(),
-                -32000,
-                format!("Guardian error: {e}"),
-            );
+            return JsonRpcResponse::error(req.id.clone(), -32000, format!("Guardian error: {e}"));
         }
     };
 
@@ -634,11 +641,7 @@ async fn handle_propose_trade(
                     error!(agent_id = %agent_id, error = %refund_err, "Failed to refund credit after execution failure");
                 }
             }
-            JsonRpcResponse::error(
-                req.id.clone(),
-                -32000,
-                format!("Execution failed: {e}"),
-            )
+            JsonRpcResponse::error(req.id.clone(), -32000, format!("Execution failed: {e}"))
         }
     }
 }
@@ -667,10 +670,7 @@ async fn handle_repay_credit(
     }
 }
 
-async fn handle_get_portfolio(
-    req: &JsonRpcRequest,
-    monitor: &Arc<Monitor>,
-) -> JsonRpcResponse {
+async fn handle_get_portfolio(req: &JsonRpcRequest, monitor: &Arc<Monitor>) -> JsonRpcResponse {
     let portfolio = monitor.get_portfolio().await;
     JsonRpcResponse::success(
         req.id.clone(),
@@ -683,12 +683,9 @@ async fn handle_get_portfolio(
     )
 }
 
-async fn handle_list_proposals(
-    req: &JsonRpcRequest,
-    monitor: &Arc<Monitor>,
-) -> JsonRpcResponse {
+async fn handle_list_proposals(req: &JsonRpcRequest, monitor: &Arc<Monitor>) -> JsonRpcResponse {
     let snapshot = monitor
-        .snapshot(Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        .snapshot(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
         .await;
 
     JsonRpcResponse::success(
@@ -756,6 +753,156 @@ async fn handle_get_credit_line(
                 }]
             }),
         ),
+    }
+}
+
+async fn handle_submit_x402(
+    req: &JsonRpcRequest,
+    banker: &Arc<Banker>,
+    args: &serde_json::Value,
+) -> JsonRpcResponse {
+    let agent_id = match parse_uuid(args, "agent_id") {
+        Ok(id) => id,
+        Err(e) => return JsonRpcResponse::error(req.id.clone(), -32602, e),
+    };
+
+    if !banker.is_registered(agent_id).await {
+        return JsonRpcResponse::error(
+            req.id.clone(),
+            -32602,
+            format!("Agent {agent_id} is not registered"),
+        );
+    }
+
+    let recipient = args
+        .get("recipient")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let amount_usd = args
+        .get("amount_usd")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
+        .min(1.0); // Hard cap: same as trades
+    let currency = args
+        .get("currency")
+        .and_then(|v| v.as_str())
+        .unwrap_or("USDC")
+        .to_string();
+    let service_url = args
+        .get("service_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let purpose = args
+        .get("purpose")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let payment = X402PaymentRequest {
+        id: Uuid::new_v4(),
+        agent_id,
+        recipient,
+        amount_usd,
+        currency,
+        service_url,
+        purpose,
+        submitted_at: Utc::now(),
+    };
+
+    let credit_line = banker.get_active_line(agent_id).await;
+    let policy = PolicyConfig::default();
+
+    let verdict =
+        match x402_interceptor::intercept_x402(&payment, credit_line.as_ref(), &policy).await {
+            Ok(v) => v,
+            Err(e) => {
+                return JsonRpcResponse::error(
+                    req.id.clone(),
+                    -32000,
+                    format!("x402 interception error: {e}"),
+                );
+            }
+        };
+
+    if verdict.approved {
+        // Low risk: auto-approve and deduct
+        if let Err(e) = banker.deduct(agent_id, amount_usd).await {
+            return JsonRpcResponse::error(
+                req.id.clone(),
+                -32000,
+                format!("x402 budget deduction failed: {e}"),
+            );
+        }
+
+        let _ = banker.tx_ref().send(DashboardEvent::X402PaymentApproved {
+            payment_id: payment.id,
+            agent_id,
+        });
+
+        JsonRpcResponse::success(
+            req.id.clone(),
+            serde_json::json!({
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string(&serde_json::json!({
+                        "approved": true,
+                        "payment_id": payment.id,
+                        "risk_level": verdict.risk_level,
+                        "reason": verdict.reason,
+                    })).unwrap_or_default()
+                }]
+            }),
+        )
+    } else if verdict.needs_human_review {
+        // Medium risk: queue for human review
+        banker
+            .store_pending_x402(
+                payment.clone(),
+                verdict.risk_level.clone(),
+                verdict.reason.clone(),
+            )
+            .await;
+
+        JsonRpcResponse::success(
+            req.id.clone(),
+            serde_json::json!({
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string(&serde_json::json!({
+                        "approved": false,
+                        "pending_review": true,
+                        "payment_id": payment.id,
+                        "risk_level": verdict.risk_level,
+                        "reason": verdict.reason,
+                    })).unwrap_or_default()
+                }]
+            }),
+        )
+    } else {
+        // High risk: auto-block
+        let _ = banker.tx_ref().send(DashboardEvent::X402PaymentBlocked {
+            payment_id: payment.id,
+            agent_id,
+            reason: verdict.reason.clone(),
+        });
+
+        JsonRpcResponse::success(
+            req.id.clone(),
+            serde_json::json!({
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string(&serde_json::json!({
+                        "approved": false,
+                        "blocked": true,
+                        "payment_id": payment.id,
+                        "risk_level": verdict.risk_level,
+                        "reason": verdict.reason,
+                    })).unwrap_or_default()
+                }]
+            }),
+        )
     }
 }
 

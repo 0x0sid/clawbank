@@ -1,8 +1,8 @@
 //! Integration tests for the Guardian module.
 
-use openclaw_aibank::types::*;
-use openclaw_aibank::guardian::Guardian;
 use chrono::{Duration, Utc};
+use openclaw_aibank::guardian::Guardian;
+use openclaw_aibank::types::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
@@ -18,16 +18,16 @@ fn make_credit_line(agent_id: Uuid) -> CreditLine {
         id: Uuid::new_v4(),
         proposal_id: Uuid::new_v4(),
         agent_id,
-        approved_usd: 10_000.0,
+        approved_usd: 5.0,
         spent_usd: 0.0,
-        remaining_usd: 10_000.0,
+        remaining_usd: 5.0,
         status: CreditStatus::Active,
         approved_at: Utc::now(),
         expires_at: Utc::now() + Duration::hours(24),
         conditions: ApprovedConditions {
             allowed_pairs: vec!["BTC-USDT".to_string(), "ETH-USDT".to_string()],
-            max_single_trade_usd: 5_000.0,
-            max_loss_usd: 2_000.0,
+            max_single_trade_usd: 1.0,
+            max_loss_usd: 3.0,
             window_end: Utc::now() + Duration::hours(24),
         },
         reputation_at_approval: 5.0,
@@ -41,7 +41,7 @@ fn make_proposal(agent_id: Uuid) -> TradeProposal {
         submitted_at: Utc::now(),
         pair: "BTC-USDT".to_string(),
         side: TradeSide::Buy,
-        amount_usd: 1_000.0,
+        amount_usd: 0.50,
         confidence: 0.75,
         reasoning: "RSI oversold".to_string(),
         contract_address: None,
@@ -134,13 +134,13 @@ async fn guardian_rejects_low_confidence() {
 async fn guardian_rejects_over_budget() {
     let agent_id = Uuid::new_v4();
     let mut line = make_credit_line(agent_id);
-    line.remaining_usd = 100.0;
+    line.remaining_usd = 0.20;
 
     let credit_lines = Arc::new(RwLock::new(HashMap::new()));
     credit_lines.write().await.insert(agent_id, line);
 
     let guardian = Guardian::new(credit_lines, PolicyConfig::default(), make_tx());
-    let proposal = make_proposal(agent_id); // requests $1000
+    let proposal = make_proposal(agent_id); // requests $0.50, exceeds $0.20 remaining
 
     let result = guardian.verify(&proposal).await.unwrap();
     assert!(!result.approved);

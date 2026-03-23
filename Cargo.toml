@@ -27,6 +27,7 @@ tokio-tungstenite = "0.21"
 tower-http = { version = "0.5", features = ["cors"] }
 thiserror = "1"
 dotenvy = "0.15"
+alloy = { version = "1.7", default-features = false, features = ["provider-http", "signers", "signer-local", "sol-types", "contract", "network", "consensus", "rpc-types", "transport-http"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

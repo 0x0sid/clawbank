@@ -23,7 +23,11 @@ async fn main() {
     let creds = match OkxCredentials::from_env() {
         Some(c) => {
             println!("[OK] Credentials loaded");
-            println!("     API Key: {}...{}", &c.api_key[..6], &c.api_key[c.api_key.len()-4..]);
+            println!(
+                "     API Key: {}...{}",
+                &c.api_key[..6],
+                &c.api_key[c.api_key.len() - 4..]
+            );
             println!("     Passphrase: {} chars", c.passphrase.len());
             c
         }
@@ -49,7 +53,10 @@ async fn main() {
                             for detail in details {
                                 let ccy = detail.get("ccy").and_then(|v| v.as_str()).unwrap_or("?");
                                 let eq = detail.get("eq").and_then(|v| v.as_str()).unwrap_or("0");
-                                let avail = detail.get("availBal").and_then(|v| v.as_str()).unwrap_or("0");
+                                let avail = detail
+                                    .get("availBal")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("0");
                                 println!("     {ccy}: eq={eq}, available={avail}");
                             }
                             if details.is_empty() {
@@ -73,7 +80,11 @@ async fn main() {
             let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("?");
             let msg = body.get("msg").and_then(|v| v.as_str()).unwrap_or("");
             if code == "0" {
-                let count = body.get("data").and_then(|d| d.as_array()).map(|a| a.len()).unwrap_or(0);
+                let count = body
+                    .get("data")
+                    .and_then(|d| d.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
                 println!("[OK] Positions API works (code=0, {count} open positions)");
             } else {
                 println!("[FAIL] code={code}, msg={msg}");
@@ -90,7 +101,11 @@ async fn main() {
             let msg = body.get("msg").and_then(|v| v.as_str()).unwrap_or("");
             if code == "0" {
                 println!("[OK] Account config API works (code=0)");
-                if let Some(data) = body.get("data").and_then(|d| d.as_array()).and_then(|a| a.first()) {
+                if let Some(data) = body
+                    .get("data")
+                    .and_then(|d| d.as_array())
+                    .and_then(|a| a.first())
+                {
                     let uid = data.get("uid").and_then(|v| v.as_str()).unwrap_or("?");
                     let acct_level = data.get("acctLv").and_then(|v| v.as_str()).unwrap_or("?");
                     let perm = data.get("perm").and_then(|v| v.as_str()).unwrap_or("?");
@@ -100,7 +115,9 @@ async fn main() {
                     if perm.contains("trade") {
                         println!("     [OK] Trade permission ENABLED");
                     } else {
-                        println!("     [WARN] Trade permission NOT enabled — live trades will fail");
+                        println!(
+                            "     [WARN] Trade permission NOT enabled — live trades will fail"
+                        );
                     }
                 }
             } else {

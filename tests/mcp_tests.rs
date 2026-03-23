@@ -4,9 +4,9 @@ use openclaw_aibank::mcp::skill::build_manifest;
 use openclaw_aibank::types::{JsonRpcRequest, JsonRpcResponse};
 
 #[test]
-fn manifest_has_all_8_tools() {
+fn manifest_has_all_9_tools() {
     let manifest = build_manifest();
-    assert_eq!(manifest.tools.len(), 8);
+    assert_eq!(manifest.tools.len(), 9);
 
     let names: Vec<&str> = manifest.tools.iter().map(|t| t.name.as_str()).collect();
     assert!(names.contains(&"agent_register"));
@@ -17,6 +17,7 @@ fn manifest_has_all_8_tools() {
     assert!(names.contains(&"list_proposals"));
     assert!(names.contains(&"get_risk_score"));
     assert!(names.contains(&"get_credit_line"));
+    assert!(names.contains(&"submit_x402_payment"));
 }
 
 #[test]
@@ -28,10 +29,7 @@ fn manifest_name_and_version() {
 
 #[test]
 fn jsonrpc_response_success() {
-    let resp = JsonRpcResponse::success(
-        serde_json::json!(1),
-        serde_json::json!({"ok": true}),
-    );
+    let resp = JsonRpcResponse::success(serde_json::json!(1), serde_json::json!({"ok": true}));
     assert!(resp.error.is_none());
     assert!(resp.result.is_some());
     assert_eq!(resp.jsonrpc, "2.0");
@@ -39,11 +37,7 @@ fn jsonrpc_response_success() {
 
 #[test]
 fn jsonrpc_response_error() {
-    let resp = JsonRpcResponse::error(
-        serde_json::json!(1),
-        -32600,
-        "Invalid request".to_string(),
-    );
+    let resp = JsonRpcResponse::error(serde_json::json!(1), -32600, "Invalid request".to_string());
     assert!(resp.result.is_none());
     assert!(resp.error.is_some());
     assert_eq!(resp.error.unwrap().code, -32600);

@@ -5,7 +5,7 @@
 
 use crate::types::{
     Agent, AgentReputation, CreditLine, DashboardSnapshot, GuardianResult, PendingProposalInfo,
-    TradeProposal,
+    PendingX402Payment, TradeProposal,
 };
 use chrono::Utc;
 use std::collections::HashMap;
@@ -74,12 +74,14 @@ impl Monitor {
         &self,
         agents: Vec<Agent>,
         pending_proposals: Vec<PendingProposalInfo>,
+        pending_x402_payments: Vec<PendingX402Payment>,
         active_credit_lines: Vec<CreditLine>,
         reputations: Vec<AgentReputation>,
     ) -> DashboardSnapshot {
         DashboardSnapshot {
             agents,
             pending_proposals,
+            pending_x402_payments,
             active_credit_lines,
             recent_proposals: self.recent_proposals.read().await.clone(),
             recent_guardian_results: self.recent_results.read().await.clone(),

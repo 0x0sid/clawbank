@@ -11,7 +11,7 @@
 - [x] `src/types.rs` — all types implemented: CreditProposal, CreditLine, CreditDecision, CreditStatus, RepaymentTrigger, Collateral, AgentReputation, DashboardEvent variants ✅ tested
 - [x] `src/banker.rs` — credit line registry, deterministic scoring, force-recall, reputation tracking ✅ tested (10 unit + 7 integration)
 - [x] `src/guardian.rs` — 6-check pipeline, check_credit_line is always first ✅ tested (10 unit + 7 integration)
-- [x] `src/mcp/skill.rs` — 8 tools over JSON-RPC stdio, all handlers wired ✅ tested (7 integration)
+- [x] `src/mcp/skill.rs` — 9 tools over JSON-RPC stdio (incl. `submit_x402_payment`), all handlers wired ✅ tested (10 unit + 7 integration)
 - [x] `src/monitor.rs` — in-memory state store, portfolio + proposals ✅ builds, exercised by poller
 - [x] `src/dashboard.rs` — Axum HTTP + WebSocket + approve/reject UI ✅ builds, serves on :3030, interactive credit approval tested live
 - [x] `.github/workflows/ci.yml` — fmt → clippy → test → build → audit → deny → solhint ⚠️ not triggered yet (no PR opened)
@@ -30,10 +30,10 @@
 
 ### Week 3-4 — On-chain treasury
 
-- [x] `contracts/AgentTreasury.sol` — ERC-4337 with validateUserOp credit enforcement ✅ written ⚠️ NOT COMPILED (Foundry not installed)
-- [x] `contracts/test/AgentTreasury.t.sol` — Foundry unit + fuzz tests ✅ written ⚠️ NOT COMPILED (Foundry not installed)
-- [ ] Deploy to Base Sepolia testnet
-- [x] Wire Banker `grantCredit` / `recallCredit` to contract after `CreditDecision` ✅ TreasuryClient in `src/execution/treasury.rs`, wired into Banker ⚠️ tx signing not yet implemented (needs `alloy` crate)
+- [x] `contracts/AgentTreasury.sol` — ERC-4337 with validateUserOp credit enforcement ✅ written ✅ compiled with Foundry
+- [x] `contracts/test/AgentTreasury.t.sol` — Foundry unit + fuzz tests ✅ written ✅ compiled with Foundry
+- [ ] Deploy to Base Sepolia testnet (deploy script ready in `foundry-deploy/script/Deploy.s.sol`)
+- [x] Wire Banker `grantCredit` / `recallCredit` to contract after `CreditDecision` ✅ TreasuryClient in `src/execution/treasury.rs` ✅ alloy crate for real tx signing on Base Sepolia
 
 ### Week 5-6 — Hardening
 
@@ -54,15 +54,15 @@
 
 ### x402 integration
 
-- [ ] `src/execution/x402.rs` — x402 payment interceptor + risk classifier
-- [ ] `X402PaymentRequest` type in `types.rs` (recipient, amount, currency, purpose, service_url)
-- [ ] `X402Verdict` and `X402RiskLevel` enums in `types.rs`
-- [ ] Guardian hook: intercept x402 before payment signature is released
-- [ ] Dashboard: "Pending x402 Payments" panel with approve/block buttons
-- [ ] Dashboard events: `X402PaymentPending`, `X402PaymentApproved`, `X402PaymentBlocked`
-- [ ] Recipient blocklist / allowlist in `PolicyConfig`
-- [ ] x402 payment deducts from credit line budget (same as buy trades)
-- [ ] Tests: known recipient auto-approve, unknown flags, blocklisted auto-blocks
+- [x] `src/execution/x402.rs` — x402 payment interceptor + risk classifier ✅ 9 unit tests
+- [x] `X402PaymentRequest` type in `types.rs` (recipient, amount, currency, purpose, service_url) ✅
+- [x] `X402Verdict` and `X402RiskLevel` enums in `types.rs` ✅
+- [x] Guardian hook: intercept x402 before payment signature is released ✅ via MCP `submit_x402_payment` tool
+- [x] Dashboard: "Pending x402 Payments" panel with approve/block buttons ✅
+- [x] Dashboard events: `X402PaymentPending`, `X402PaymentApproved`, `X402PaymentBlocked` ✅
+- [x] Recipient blocklist / allowlist in `PolicyConfig` ✅
+- [x] x402 payment deducts from credit line budget (same as buy trades) ✅
+- [x] Tests: known recipient auto-approve, unknown flags, blocklisted auto-blocks ✅ 9 unit + 9 integration
 
 ### Known issues
 
@@ -73,7 +73,8 @@
 - ✅ Sell trades (reconversion to USDT) do not consume budget
 - ⚠️ `okx-trade-mcp` and `onchainos-skills` not installed — falls back to OKX REST API
 - ⚠️ CI workflows haven't been triggered yet — need to open a PR or push to trigger
-- ⚠️ Solidity contract not compiled — Foundry not installed
+- ✅ Solidity contract compiled with Foundry — deploy script ready
+- ⚠️ AgentTreasury not yet deployed — needs BANKER_KEY with Base Sepolia ETH
 
 ---
 
