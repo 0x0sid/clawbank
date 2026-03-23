@@ -36,7 +36,9 @@ fn good_proposal(agent_id: Uuid) -> CreditProposal {
 #[tokio::test]
 async fn banker_register_and_check() {
     let banker = Banker::new(make_tx());
-    let agent = banker.register_agent("integration-test".to_string()).await;
+    let agent = banker
+        .register_agent("integration-test".to_string(), None)
+        .await;
     assert!(banker.is_registered(agent.id).await);
     assert!(!banker.is_registered(Uuid::new_v4()).await);
 }
@@ -44,7 +46,7 @@ async fn banker_register_and_check() {
 #[tokio::test]
 async fn banker_approve_good_proposal() {
     let banker = Banker::new(make_tx());
-    let agent = banker.register_agent("good".to_string()).await;
+    let agent = banker.register_agent("good".to_string(), None).await;
     let proposal = good_proposal(agent.id);
     let decision = banker.evaluate(&proposal).await;
 
@@ -62,7 +64,7 @@ async fn banker_approve_good_proposal() {
 #[tokio::test]
 async fn banker_reject_bad_proposal() {
     let banker = Banker::new(make_tx());
-    let agent = banker.register_agent("risky".to_string()).await;
+    let agent = banker.register_agent("risky".to_string(), None).await;
 
     let proposal = CreditProposal {
         id: Uuid::new_v4(),
@@ -89,7 +91,7 @@ async fn banker_reject_bad_proposal() {
 #[tokio::test]
 async fn banker_deduct_insufficient_credit() {
     let banker = Banker::new(make_tx());
-    let agent = banker.register_agent("deduct-test".to_string()).await;
+    let agent = banker.register_agent("deduct-test".to_string(), None).await;
     let proposal = good_proposal(agent.id);
     banker.evaluate(&proposal).await;
     let credit_line = banker
@@ -106,7 +108,9 @@ async fn banker_deduct_insufficient_credit() {
 #[tokio::test]
 async fn banker_recall_updates_reputation() {
     let banker = Banker::new(make_tx());
-    let agent = banker.register_agent("recall-rep-test".to_string()).await;
+    let agent = banker
+        .register_agent("recall-rep-test".to_string(), None)
+        .await;
 
     let proposal = good_proposal(agent.id);
     banker.evaluate(&proposal).await;
@@ -129,7 +133,7 @@ async fn banker_recall_updates_reputation() {
 #[tokio::test]
 async fn banker_repay_updates_reputation_positively() {
     let banker = Banker::new(make_tx());
-    let agent = banker.register_agent("repay-test".to_string()).await;
+    let agent = banker.register_agent("repay-test".to_string(), None).await;
 
     let proposal = good_proposal(agent.id);
     banker.evaluate(&proposal).await;
@@ -158,7 +162,7 @@ async fn banker_no_active_line_for_unregistered() {
 #[tokio::test]
 async fn banker_refund_restores_budget() {
     let banker = Banker::new(make_tx());
-    let agent = banker.register_agent("refund-test".to_string()).await;
+    let agent = banker.register_agent("refund-test".to_string(), None).await;
     let proposal = good_proposal(agent.id);
     banker.evaluate(&proposal).await;
     banker
@@ -186,7 +190,7 @@ async fn banker_refund_restores_budget() {
 #[tokio::test]
 async fn banker_expired_line_returns_none() {
     let banker = Banker::new(make_tx());
-    let agent = banker.register_agent("expire-test".to_string()).await;
+    let agent = banker.register_agent("expire-test".to_string(), None).await;
 
     // Create a proposal with a window_end in the past
     let mut proposal = good_proposal(agent.id);

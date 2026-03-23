@@ -67,11 +67,13 @@ impl Banker {
     }
 
     /// Register an agent. Returns the agent record. No trades possible without registration.
-    pub async fn register_agent(&self, name: String) -> Agent {
+    /// `evm_address` is optional — if provided, on-chain treasury calls use it.
+    pub async fn register_agent(&self, name: String, evm_address: Option<String>) -> Agent {
         let agent = Agent {
             id: Uuid::new_v4(),
             name: name.clone(),
             registered_at: Utc::now(),
+            evm_address,
         };
 
         self.agents.write().await.insert(agent.id, agent.clone());
@@ -225,14 +227,27 @@ impl Banker {
             "Credit line granted (human approved)"
         );
 
-        // On-chain: call grantCredit on AgentTreasury contract
+        // On-chain: call grantCredit on AgentTreasury contract (if agent has an EVM address)
         if let Some(ref treasury) = self.treasury {
-            let agent_addr = format!("0x{}", pending.proposal.agent_id.simple());
-            if let Err(e) = treasury
-                .grant_credit(&agent_addr, final_usd, pending.proposal.window_end)
+            let evm_addr = self
+                .agents
+                .read()
                 .await
-            {
-                error!(agent_id = %pending.proposal.agent_id, error = %e, "On-chain grantCredit failed");
+                .get(&pending.proposal.agent_id)
+                .and_then(|a| a.evm_address.clone());
+
+            if let Some(addr) = evm_addr {
+                if let Err(e) = treasury
+                    .grant_credit(&addr, final_usd, pending.proposal.window_end)
+                    .await
+                {
+                    error!(agent_id = %pending.proposal.agent_id, error = %e, "On-chain grantCredit failed");
+                }
+            } else {
+                info!(
+                    agent_id = %pending.proposal.agent_id,
+                    "Skipping on-chain grantCredit — agent has no EVM address"
+                );
             }
         }
 
@@ -389,11 +404,24 @@ impl Banker {
             "Credit line recalled"
         );
 
-        // On-chain: call recallCredit on AgentTreasury contract
+        // On-chain: call recallCredit on AgentTreasury contract (if agent has an EVM address)
         if let Some(ref treasury) = self.treasury {
-            let agent_addr = format!("0x{}", agent_id.simple());
-            if let Err(e) = treasury.recall_credit(&agent_addr, &reason).await {
-                error!(agent_id = %agent_id, error = %e, "On-chain recallCredit failed");
+            let evm_addr = self
+                .agents
+                .read()
+                .await
+                .get(&agent_id)
+                .and_then(|a| a.evm_address.clone());
+
+            if let Some(addr) = evm_addr {
+                if let Err(e) = treasury.recall_credit(&addr, &reason).await {
+                    error!(agent_id = %agent_id, error = %e, "On-chain recallCredit failed");
+                }
+            } else {
+                info!(
+                    agent_id = %agent_id,
+                    "Skipping on-chain recallCredit — agent has no EVM address"
+                );
             }
         }
 
@@ -759,14 +787,14 @@ mod tests {
     #[tokio::test]
     async fn test_register_agent() {
         let banker = Banker::new(make_tx());
-        let agent = banker.register_agent("test-agent".to_string()).await;
+        let agent = banker.register_agent("test-agent".to_string(), None).await;
         assert!(banker.is_registered(agent.id).await);
     }
 
     #[tokio::test]
     async fn test_good_proposal_approved() {
         let banker = Banker::new(make_tx());
-        let agent = banker.register_agent("good-agent".to_string()).await;
+        let agent = banker.register_agent("good-agent".to_string(), None).await;
         let proposal = good_proposal(agent.id);
         let decision = banker.evaluate(&proposal).await;
         // evaluate() queues as pending — not auto-approved
@@ -783,7 +811,7 @@ mod tests {
     #[tokio::test]
     async fn test_bad_proposal_rejected() {
         let banker = Banker::new(make_tx());
-        let agent = banker.register_agent("bad-agent".to_string()).await;
+        let agent = banker.register_agent("bad-agent".to_string(), None).await;
         let proposal = bad_proposal(agent.id);
         let decision = banker.evaluate(&proposal).await;
         assert!(!decision.approved);
@@ -794,7 +822,9 @@ mod tests {
     #[tokio::test]
     async fn test_deduct_and_repay() {
         let banker = Banker::new(make_tx());
-        let agent = banker.register_agent("deduct-agent".to_string()).await;
+        let agent = banker
+            .register_agent("deduct-agent".to_string(), None)
+            .await;
         let proposal = good_proposal(agent.id);
         banker.evaluate(&proposal).await;
         let credit_line = banker
@@ -817,7 +847,9 @@ mod tests {
     #[tokio::test]
     async fn test_recall() {
         let banker = Banker::new(make_tx());
-        let agent = banker.register_agent("recall-agent".to_string()).await;
+        let agent = banker
+            .register_agent("recall-agent".to_string(), None)
+            .await;
         let proposal = good_proposal(agent.id);
         banker.evaluate(&proposal).await;
         banker

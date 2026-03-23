@@ -44,7 +44,8 @@ pub fn build_manifest() -> McpManifest {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "name": { "type": "string", "description": "Agent display name" }
+                        "name": { "type": "string", "description": "Agent display name" },
+                        "evm_address": { "type": "string", "description": "Optional EVM address (0x-prefixed) for on-chain treasury credit grants" }
                     },
                     "required": ["name"]
                 }),
@@ -329,7 +330,12 @@ async fn handle_agent_register(
         }
     };
 
-    let agent = banker.register_agent(name).await;
+    let evm_address = args
+        .get("evm_address")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let agent = banker.register_agent(name, evm_address).await;
     JsonRpcResponse::success(
         req.id.clone(),
         serde_json::json!({

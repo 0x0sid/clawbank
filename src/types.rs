@@ -19,6 +19,9 @@ pub struct Agent {
     pub id: Uuid,
     pub name: String,
     pub registered_at: DateTime<Utc>,
+    /// Optional EVM address for on-chain treasury credit grants.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evm_address: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

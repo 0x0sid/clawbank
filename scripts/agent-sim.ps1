@@ -103,7 +103,7 @@ Write-Host ""
 Write-Host "[1/3] Registering agent..." -ForegroundColor Cyan
 $regReq = @{
     jsonrpc = "2.0"; id = 1; method = "tools/call"
-    params = @{ name = "agent_register"; arguments = @{ name = "claw-trader-01" } }
+    params = @{ name = "agent_register"; arguments = @{ name = "claw-trader-01"; evm_address = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8" } }
 } | ConvertTo-Json -Depth 5 -Compress
 
 $regResp = Send-Mcp $regReq

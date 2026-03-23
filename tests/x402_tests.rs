@@ -219,7 +219,7 @@ async fn x402_intercept_medium_needs_review() {
 #[tokio::test]
 async fn banker_x402_store_and_approve() {
     let banker = Banker::new(make_tx());
-    let agent = banker.register_agent("x402-agent".to_string()).await;
+    let agent = banker.register_agent("x402-agent".to_string(), None).await;
     let proposal = good_proposal(agent.id);
     banker.evaluate(&proposal).await;
     banker
@@ -258,7 +258,9 @@ async fn banker_x402_store_and_approve() {
 #[tokio::test]
 async fn banker_x402_store_and_block() {
     let banker = Banker::new(make_tx());
-    let agent = banker.register_agent("x402-block-agent".to_string()).await;
+    let agent = banker
+        .register_agent("x402-block-agent".to_string(), None)
+        .await;
     let proposal = good_proposal(agent.id);
     banker.evaluate(&proposal).await;
     banker
