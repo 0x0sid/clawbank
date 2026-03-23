@@ -48,6 +48,7 @@ out/
 foundry-deploy/lib/
 foundry-deploy/cache/
 foundry-deploy/out/
+foundry-deploy/broadcast/
 
 # Test coverage
 tarpaulin-report.html
