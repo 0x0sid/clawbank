@@ -74,6 +74,15 @@ powershell -ExecutionPolicy Bypass -File .\scripts\agent-sim.ps1
 # Then open http://localhost:3030 and click Approve or Reject
 ```
 
+## Dashboard features
+
+- **Web3 Wallet Connect** — connect MetaMask/OKX Wallet/Rabby to register agents with EVM address + signature proof. Greyed out when no extension detected.
+- **OKX Trade History** — live trade table from your OKX account (or simulated demo trades when no credentials). Shows pair, side, size, price, PnL, status.
+- **Settings → OKX CEX API** — view connection status, replace API keys at runtime. Credentials loaded from `.env` by default. Bad keys are rejected and not saved.
+- **Portfolio (OKX)** — real-time balances polled every 30s.
+- **Credit Proposals** — approve/reject pending agent credit requests.
+- **x402 Payments** — review flagged agent payment attempts.
+
 ## Dashboard API
 
 | Endpoint | Method | Description |
@@ -83,6 +92,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\agent-sim.ps1
 | `/api/snapshot` | GET | Full state JSON (includes pending proposals) |
 | `/api/credit/:id/approve` | POST | Approve a pending credit proposal |
 | `/api/credit/:id/reject` | POST | Reject a pending credit proposal |
+| `/api/agent/register` | POST | Register agent via wallet signature verification |
+| `/api/okx/connect` | POST | Save OKX API credentials at runtime |
+| `/api/okx/status` | GET | OKX connection status + masked key preview |
+| `/api/okx/trades` | GET | Recent OKX trade history (live or simulated) |
 
 ## MCP tools
 
