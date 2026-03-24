@@ -46,6 +46,7 @@ pub fn build_router(state: DashboardState) -> Router {
         .route("/api/agent/register", post(wallet_register_handler))
         .route("/api/okx/connect", post(okx_connect_handler))
         .route("/api/okx/status", get(okx_status_handler))
+        .route("/api/okx/trades", get(okx_trades_handler))
         .with_state(state)
 }
 
@@ -325,6 +326,8 @@ async fn okx_connect_handler(
         passphrase,
     };
 
+    // Save credentials temporarily for the verification test
+    let previous = state.okx_rest.take_credentials().await;
     state.okx_rest.set_credentials(creds).await;
 
     // Verify credentials by attempting a balance fetch
@@ -342,11 +345,11 @@ async fn okx_connect_handler(
             }))
         }
         Err(e) => {
-            warn!(error = %e, "OKX credential verification failed");
+            // Revert to previous credentials on failure
+            warn!(error = %e, "OKX credential verification failed — reverting");
+            state.okx_rest.restore_credentials(previous).await;
             Json(serde_json::json!({
-                "ok": true,
-                "message": "Credentials saved, but verification failed — check key permissions",
-                "warning": e.to_string(),
+                "error": format!("OKX verification failed: {e}. Credentials not saved."),
             }))
         }
     }
@@ -359,6 +362,22 @@ async fn okx_status_handler(State(state): State<DashboardState>) -> impl IntoRes
         "connected": key_preview.is_some(),
         "api_key_preview": key_preview,
     }))
+}
+
+/// Fetch recent OKX trade history (live or simulated).
+async fn okx_trades_handler(State(state): State<DashboardState>) -> impl IntoResponse {
+    match state.okx_rest.get_recent_trades().await {
+        Ok(trades) => Json(serde_json::json!({
+            "ok": true,
+            "simulated": state.okx_rest.api_key_preview().await.is_none(),
+            "trades": trades,
+        })),
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "error": e.to_string(),
+            "trades": [],
+        })),
+    }
 }
 
 /// Inline HTML for the dashboard — no build step required.
@@ -434,6 +453,11 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
   .okx-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 10px; border-radius: 6px; }
   .okx-status.live { color: var(--green); background: rgba(16,185,129,0.1); }
   .okx-status.sim { color: var(--yellow); background: rgba(245,158,11,0.1); }
+  .trade-side-buy { color: var(--green); font-weight: 600; }
+  .trade-side-sell { color: var(--red); font-weight: 600; }
+  .sim-badge { font-size: 10px; color: var(--yellow); background: rgba(245,158,11,0.1); padding: 2px 8px; border-radius: 4px; margin-left: 8px; vertical-align: middle; }
+  .btn-wallet.disabled { opacity: 0.4; cursor: not-allowed; border-color: var(--border); color: var(--muted); }
+  .btn-wallet.disabled:hover { background: transparent; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -444,6 +468,7 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
   <div class="wallet-bar">
     <span id="wallet-addr" class="wallet-addr" style="display:none;"></span>
     <button class="btn-wallet" id="btn-connect" onclick="connectWallet()">Connect Wallet</button>
+    <span id="wallet-no-ext" style="display:none;color:var(--muted);font-size:11px;">No wallet extension</span>
   </div>
 </header>
 
@@ -483,6 +508,11 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
     <div id="portfolio-panel"><div class="empty">No portfolio data</div></div>
   </div>
 
+  <div class="panel full-width">
+    <h2>OKX Trade History <span class="sim-badge" id="trade-sim-badge" style="display:none;">SIMULATED</span></h2>
+    <div id="trades-panel"><div class="empty">Loading trades...</div></div>
+  </div>
+
   <div class="panel">
     <h2>Statistics</h2>
     <div class="stats-row" id="stats-panel">
@@ -518,11 +548,22 @@ const state = { trades: 0, approved: 0, rejected: 0, recalls: 0 };
 let ws;
 let walletAddress = null;
 
+// ---------- Wallet Detection ----------
+(function detectWallet() {
+  const btn = document.getElementById('btn-connect');
+  if (!window.ethereum) {
+    btn.classList.add('disabled');
+    btn.textContent = 'No Wallet';
+    btn.title = 'Install MetaMask, OKX Wallet, or Rabby browser extension';
+    document.getElementById('wallet-no-ext').style.display = 'inline';
+  }
+})();
+
 // ---------- Wallet Connect ----------
 
 async function connectWallet() {
   if (!window.ethereum) {
-    alert('No Web3 wallet detected.\nInstall MetaMask, OKX Wallet, or Rabby.');
+    alert('No Web3 wallet detected.\nInstall MetaMask, OKX Wallet, or Rabby browser extension.');
     return;
   }
   try {
@@ -676,6 +717,7 @@ async function saveOkxKeys() {
       document.getElementById('okx-api-key').placeholder = data.api_key_prefix || 'API Key (configured)';
       document.getElementById('okx-secret-key').placeholder = 'Secret Key (configured)';
       document.getElementById('okx-passphrase').placeholder = 'Passphrase (configured)';
+      loadTrades();
     }
   } catch (e) {
     showResult(result, 'error', 'Error: ' + (e.message || e));
@@ -693,6 +735,44 @@ function setOkxStatus(live, preview) {
     el.className = 'okx-status sim';
     el.textContent = 'Simulated';
   }
+}
+
+// ---------- OKX Trade History ----------
+
+async function loadTrades() {
+  try {
+    const resp = await fetch('/api/okx/trades');
+    const data = await resp.json();
+    if (data.simulated) {
+      document.getElementById('trade-sim-badge').style.display = 'inline';
+    } else {
+      document.getElementById('trade-sim-badge').style.display = 'none';
+    }
+    renderTrades(data.trades || []);
+  } catch (e) {
+    document.getElementById('trades-panel').innerHTML = '<div class="empty">Failed to load trades</div>';
+  }
+}
+
+function renderTrades(trades) {
+  const el = document.getElementById('trades-panel');
+  if (!trades.length) { el.innerHTML = '<div class="empty">No trades found</div>'; return; }
+  el.innerHTML = '<table><tr><th>Time</th><th>Pair</th><th>Side</th><th>Size</th><th>Price</th><th>PnL</th><th>Status</th></tr>' +
+    trades.map(t => {
+      const time = new Date(t.timestamp_ms).toLocaleTimeString();
+      const cls = t.side === 'buy' ? 'trade-side-buy' : 'trade-side-sell';
+      const pnl = t.pnl !== 0 ? (t.pnl > 0 ? '+' : '') + t.pnl.toFixed(4) : '-';
+      const pnlCls = t.pnl > 0 ? 'color:var(--green)' : t.pnl < 0 ? 'color:var(--red)' : '';
+      return '<tr>' +
+        '<td>' + time + '</td>' +
+        '<td><strong>' + t.inst_id + '</strong></td>' +
+        '<td class="' + cls + '">' + t.side.toUpperCase() + '</td>' +
+        '<td>' + t.size + '</td>' +
+        '<td>$' + t.price.toLocaleString() + '</td>' +
+        '<td style="' + pnlCls + '">' + pnl + '</td>' +
+        '<td>' + t.state + '</td>' +
+      '</tr>';
+    }).join('') + '</table>';
 }
 
 // ---------- WebSocket ----------
@@ -918,6 +998,7 @@ function updateStats() {
 
 connect();
 loadOkxStatus();
+loadTrades();
 </script>
 </body>
 </html>"#;

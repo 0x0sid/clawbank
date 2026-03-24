@@ -80,6 +80,16 @@ impl OkxRestClient {
         info!("OKX credentials updated at runtime");
     }
 
+    /// Take current credentials out (leaves None), returning the previous value.
+    pub async fn take_credentials(&self) -> Option<OkxCredentials> {
+        self.credentials.write().await.take()
+    }
+
+    /// Restore previously saved credentials.
+    pub async fn restore_credentials(&self, creds: Option<OkxCredentials>) {
+        *self.credentials.write().await = creds;
+    }
+
     /// Return a masked preview of the current API key, e.g. "abc123...".
     /// Returns None if no credentials are configured.
     pub async fn api_key_preview(&self) -> Option<String> {
@@ -367,6 +377,71 @@ impl OkxRestClient {
         Ok(positions)
     }
 
+    /// Fetch recent trade history from OKX (last 7 days).
+    /// Returns parsed trades or simulated demo trades when no credentials.
+    pub async fn get_recent_trades(&self) -> Result<Vec<OkxTrade>, AppError> {
+        let guard = self.credentials.read().await;
+        let creds = match guard.as_ref() {
+            Some(c) => c,
+            None => return Ok(self.simulated_trades()),
+        };
+
+        let path = "/api/v5/trade/orders-history-archive?instType=SPOT&limit=20";
+        let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+        let sign = self.sign(creds, &timestamp, "GET", path, "")?;
+
+        let resp = self
+            .client
+            .get(format!("{OKX_BASE_URL}{path}"))
+            .header("OK-ACCESS-KEY", &creds.api_key)
+            .header("OK-ACCESS-SIGN", &sign)
+            .header("OK-ACCESS-TIMESTAMP", &timestamp)
+            .header("OK-ACCESS-PASSPHRASE", &creds.passphrase)
+            .header("Content-Type", "application/json")
+            .send()
+            .await
+            .map_err(|e| AppError::OkxError(format!("Trade history request failed: {e}")))?;
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::OkxError(format!("Trade history parse failed: {e}")))?;
+
+        let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("?");
+        if code != "0" {
+            let msg = body.get("msg").and_then(|v| v.as_str()).unwrap_or("");
+            return Err(AppError::OkxError(format!(
+                "OKX trade history failed: code={code} msg={msg}"
+            )));
+        }
+
+        let mut trades = Vec::new();
+        if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
+            for t in data {
+                let inst_id = t.get("instId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let side = t.get("side").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let sz: f64 = t.get("fillSz").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let px: f64 = t.get("fillPx").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let pnl: f64 = t.get("pnl").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let state = t.get("state").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let ts: i64 = t.get("uTime").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+                trades.push(OkxTrade {
+                    inst_id,
+                    side,
+                    size: sz,
+                    price: px,
+                    pnl,
+                    state,
+                    timestamp_ms: ts,
+                });
+            }
+        }
+
+        info!(count = trades.len(), "Trade history fetched from OKX");
+        Ok(trades)
+    }
+
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
@@ -396,6 +471,40 @@ impl OkxRestClient {
         balances.insert("ETH".to_string(), 0.0);
         balances
     }
+
+    /// Simulated trade history when no OKX credentials are available.
+    fn simulated_trades(&self) -> Vec<OkxTrade> {
+        let now = Utc::now().timestamp_millis();
+        vec![
+            OkxTrade {
+                inst_id: "BTC-USDT".to_string(),
+                side: "buy".to_string(),
+                size: 0.00001,
+                price: 67250.0,
+                pnl: 0.0,
+                state: "filled".to_string(),
+                timestamp_ms: now - 3_600_000,
+            },
+            OkxTrade {
+                inst_id: "ETH-USDT".to_string(),
+                side: "buy".to_string(),
+                size: 0.0003,
+                price: 3520.0,
+                pnl: 0.0,
+                state: "filled".to_string(),
+                timestamp_ms: now - 7_200_000,
+            },
+            OkxTrade {
+                inst_id: "BTC-USDT".to_string(),
+                side: "sell".to_string(),
+                size: 0.00001,
+                price: 67400.0,
+                pnl: 0.15,
+                state: "filled".to_string(),
+                timestamp_ms: now - 1_800_000,
+            },
+        ]
+    }
 }
 
 /// A parsed OKX position for P&L tracking.
@@ -405,4 +514,16 @@ pub struct OkxPosition {
     pub inst_id: String,
     pub unrealized_pnl: f64,
     pub notional_usd: f64,
+}
+
+/// A parsed OKX trade for trade history display.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OkxTrade {
+    pub inst_id: String,
+    pub side: String,
+    pub size: f64,
+    pub price: f64,
+    pub pnl: f64,
+    pub state: String,
+    pub timestamp_ms: i64,
 }
