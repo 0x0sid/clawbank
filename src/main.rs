@@ -106,6 +106,7 @@ async fn main() {
         banker: Arc::clone(&banker),
         monitor: Arc::clone(&monitor),
         tx: tx.clone(),
+        okx_rest: Arc::clone(&rest_client),
     };
 
     let dashboard_task = tokio::spawn(async move {

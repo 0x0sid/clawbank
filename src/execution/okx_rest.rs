@@ -10,6 +10,7 @@ use hmac::{Hmac, Mac};
 use reqwest::Client;
 use sha2::Sha256;
 use std::collections::HashMap;
+use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -47,7 +48,7 @@ impl OkxCredentials {
 /// OKX REST client for portfolio queries and order management.
 pub struct OkxRestClient {
     client: Client,
-    credentials: Option<OkxCredentials>,
+    credentials: RwLock<Option<OkxCredentials>>,
 }
 
 impl Default for OkxRestClient {
@@ -69,13 +70,30 @@ impl OkxRestClient {
 
         Self {
             client: Client::new(),
-            credentials,
+            credentials: RwLock::new(credentials),
         }
+    }
+
+    /// Update OKX credentials at runtime (e.g. from dashboard).
+    pub async fn set_credentials(&self, creds: OkxCredentials) {
+        *self.credentials.write().await = Some(creds);
+        info!("OKX credentials updated at runtime");
+    }
+
+    /// Return a masked preview of the current API key, e.g. "abc123...".
+    /// Returns None if no credentials are configured.
+    pub async fn api_key_preview(&self) -> Option<String> {
+        self.credentials.read().await.as_ref().map(|c| {
+            let key = &c.api_key;
+            let visible = key.len().min(8);
+            format!("{}...", &key[..visible])
+        })
     }
 
     /// Fetch account balances from OKX. Returns a map of asset -> balance.
     pub async fn get_balances(&self) -> Result<HashMap<String, f64>, AppError> {
-        let creds = match &self.credentials {
+        let guard = self.credentials.read().await;
+        let creds = match guard.as_ref() {
             Some(c) => c,
             None => return Ok(self.simulated_balances()),
         };
@@ -141,7 +159,8 @@ impl OkxRestClient {
 
     /// Cancel all pending orders for a given instrument.
     pub async fn cancel_all_orders(&self, inst_id: &str) -> Result<(), AppError> {
-        let creds = match &self.credentials {
+        let guard = self.credentials.read().await;
+        let creds = match guard.as_ref() {
             Some(c) => c,
             None => {
                 warn!(inst_id = %inst_id, "Cannot cancel orders — no OKX credentials");
@@ -201,7 +220,8 @@ impl OkxRestClient {
         side: &str,
         amount_usd: f64,
     ) -> Result<serde_json::Value, AppError> {
-        let creds = match &self.credentials {
+        let guard = self.credentials.read().await;
+        let creds = match guard.as_ref() {
             Some(c) => c,
             None => {
                 return Err(AppError::OkxError(
@@ -287,7 +307,8 @@ impl OkxRestClient {
 
     /// Get open positions for P&L tracking.
     pub async fn get_positions(&self) -> Result<Vec<OkxPosition>, AppError> {
-        let creds = match &self.credentials {
+        let guard = self.credentials.read().await;
+        let creds = match guard.as_ref() {
             Some(c) => c,
             None => return Ok(Vec::new()),
         };

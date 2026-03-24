@@ -7,6 +7,7 @@
 //! - `POST /api/agent/register`  — register agent via wallet signature
 
 use crate::banker::Banker;
+use crate::execution::okx_rest::{OkxCredentials, OkxRestClient};
 use crate::monitor::Monitor;
 use crate::types::DashboardEvent;
 use alloy::primitives::{Address, Signature as EcdsaSignature};
@@ -29,6 +30,7 @@ pub struct DashboardState {
     pub banker: Arc<Banker>,
     pub monitor: Arc<Monitor>,
     pub tx: broadcast::Sender<DashboardEvent>,
+    pub okx_rest: Arc<OkxRestClient>,
 }
 
 /// Build the Axum router for the dashboard.
@@ -42,6 +44,8 @@ pub fn build_router(state: DashboardState) -> Router {
         .route("/api/x402/:payment_id/approve", post(x402_approve_handler))
         .route("/api/x402/:payment_id/block", post(x402_block_handler))
         .route("/api/agent/register", post(wallet_register_handler))
+        .route("/api/okx/connect", post(okx_connect_handler))
+        .route("/api/okx/status", get(okx_status_handler))
         .with_state(state)
 }
 
@@ -294,6 +298,69 @@ async fn wallet_register_handler(
     }))
 }
 
+/// Connect OKX CEX account via dashboard (API key, secret, passphrase).
+///
+/// Expects JSON body: `{ "api_key": "...", "secret_key": "...", "passphrase": "..." }`
+/// Validates credentials by making a test balance request to OKX.
+async fn okx_connect_handler(
+    State(state): State<DashboardState>,
+    axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let api_key = match body.get("api_key").and_then(|v| v.as_str()) {
+        Some(k) if !k.trim().is_empty() => k.trim().to_string(),
+        _ => return Json(serde_json::json!({"error": "Missing or empty 'api_key'"})),
+    };
+    let secret_key = match body.get("secret_key").and_then(|v| v.as_str()) {
+        Some(k) if !k.trim().is_empty() => k.trim().to_string(),
+        _ => return Json(serde_json::json!({"error": "Missing or empty 'secret_key'"})),
+    };
+    let passphrase = match body.get("passphrase").and_then(|v| v.as_str()) {
+        Some(k) if !k.trim().is_empty() => k.trim().to_string(),
+        _ => return Json(serde_json::json!({"error": "Missing or empty 'passphrase'"})),
+    };
+
+    let creds = OkxCredentials {
+        api_key: api_key.clone(),
+        secret_key,
+        passphrase,
+    };
+
+    state.okx_rest.set_credentials(creds).await;
+
+    // Verify credentials by attempting a balance fetch
+    match state.okx_rest.get_balances().await {
+        Ok(balances) => {
+            info!(
+                assets = balances.len(),
+                "OKX CEX account connected via dashboard"
+            );
+            Json(serde_json::json!({
+                "ok": true,
+                "message": "OKX account connected",
+                "api_key_prefix": format!("{}...", &api_key[..api_key.len().min(6)]),
+                "assets": balances.len(),
+            }))
+        }
+        Err(e) => {
+            warn!(error = %e, "OKX credential verification failed");
+            Json(serde_json::json!({
+                "ok": true,
+                "message": "Credentials saved, but verification failed — check key permissions",
+                "warning": e.to_string(),
+            }))
+        }
+    }
+}
+
+/// Check OKX CEX connection status, returns masked key prefix.
+async fn okx_status_handler(State(state): State<DashboardState>) -> impl IntoResponse {
+    let key_preview = state.okx_rest.api_key_preview().await;
+    Json(serde_json::json!({
+        "connected": key_preview.is_some(),
+        "api_key_preview": key_preview,
+    }))
+}
+
 /// Inline HTML for the dashboard — no build step required.
 const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
@@ -361,6 +428,12 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
   .register-result { margin-top: 10px; padding: 10px 14px; border-radius: 6px; font-size: 13px; display: none; }
   .register-result.success { display: block; background: rgba(16,185,129,0.1); color: var(--green); border: 1px solid rgba(16,185,129,0.3); }
   .register-result.error { display: block; background: rgba(239,68,68,0.1); color: var(--red); border: 1px solid rgba(239,68,68,0.3); }
+  .okx-form { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 10px; align-items: center; }
+  .okx-form input { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 13px; }
+  .okx-form input:focus { outline: none; border-color: var(--accent); }
+  .okx-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 10px; border-radius: 6px; }
+  .okx-status.live { color: var(--green); background: rgba(16,185,129,0.1); }
+  .okx-status.sim { color: var(--yellow); background: rgba(245,158,11,0.1); }
 </style>
 </head>
 <body>
@@ -421,6 +494,20 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
   </div>
 
   <div class="panel full-width">
+    <h2>Settings</h2>
+    <div style="margin-bottom:14px;">
+      <h3 style="font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:10px;">OKX CEX API <span class="okx-status sim" id="okx-status">Simulated</span></h3>
+      <div class="okx-form">
+        <input type="text" id="okx-api-key" placeholder="API Key" autocomplete="off" />
+        <input type="password" id="okx-secret-key" placeholder="Secret Key" autocomplete="off" />
+        <input type="password" id="okx-passphrase" placeholder="Passphrase" autocomplete="off" />
+        <button class="btn btn-approve" onclick="saveOkxKeys()" id="btn-okx-save">Save</button>
+      </div>
+      <div class="register-result" id="okx-result"></div>
+    </div>
+  </div>
+
+  <div class="panel full-width">
     <h2>Live Events</h2>
     <div class="event-list" id="event-list"><div class="empty">Waiting for events...</div></div>
   </div>
@@ -440,7 +527,10 @@ async function connectWallet() {
   }
   try {
     const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-    if (accounts.length === 0) return;
+    if (!accounts || accounts.length === 0) {
+      alert('No accounts found in your wallet.\nCreate or import an account first.');
+      return;
+    }
     walletAddress = accounts[0];
     const short = walletAddress.substring(0, 6) + '...' + walletAddress.substring(38);
     document.getElementById('wallet-addr').textContent = short;
@@ -450,7 +540,14 @@ async function connectWallet() {
     document.getElementById('register-panel').style.display = 'block';
   } catch (e) {
     console.error('Wallet connect failed:', e);
-    alert('Wallet connect failed: ' + (e.message || e));
+    const msg = (e.message || String(e)).toLowerCase();
+    if (msg.includes('at least one account')) {
+      alert('Your wallet has no accounts yet.\n\nTo fix:\n1. Click the wallet icon in your browser toolbar\n2. Create a new wallet or import one\n3. Then come back here and click Connect Wallet again');
+    } else if (e.code === 4001) {
+      alert('Connection request was rejected.');
+    } else {
+      alert('Wallet connect failed: ' + (e.message || e));
+    }
   }
 }
 
@@ -523,6 +620,79 @@ function showResult(el, type, msg) {
   el.className = 'register-result ' + type;
   el.textContent = msg;
   el.style.display = 'block';
+}
+
+// ---------- OKX Settings ----------
+
+async function loadOkxStatus() {
+  try {
+    const resp = await fetch('/api/okx/status');
+    const data = await resp.json();
+    setOkxStatus(data.connected, data.api_key_preview);
+    if (data.connected) {
+      document.getElementById('okx-api-key').placeholder = data.api_key_preview || 'API Key (configured)';
+      document.getElementById('okx-secret-key').placeholder = 'Secret Key (configured)';
+      document.getElementById('okx-passphrase').placeholder = 'Passphrase (configured)';
+    }
+  } catch (e) { /* ignore */ }
+}
+
+async function saveOkxKeys() {
+  const apiKey = document.getElementById('okx-api-key').value.trim();
+  const secretKey = document.getElementById('okx-secret-key').value.trim();
+  const passphrase = document.getElementById('okx-passphrase').value.trim();
+  const result = document.getElementById('okx-result');
+  result.className = 'register-result';
+  result.style.display = 'none';
+
+  if (!apiKey || !secretKey || !passphrase) {
+    showResult(result, 'error', 'All three fields are required.');
+    return;
+  }
+
+  const btn = document.getElementById('btn-okx-save');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+
+  try {
+    const resp = await fetch('/api/okx/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: apiKey, secret_key: secretKey, passphrase }),
+    });
+    const data = await resp.json();
+
+    if (data.error) {
+      showResult(result, 'error', data.error);
+    } else if (data.warning) {
+      showResult(result, 'error', data.message + ' — ' + data.warning);
+      setOkxStatus(true, data.api_key_prefix);
+    } else {
+      showResult(result, 'success', data.message + ' (' + data.assets + ' assets found)');
+      setOkxStatus(true, data.api_key_prefix);
+      document.getElementById('okx-api-key').value = '';
+      document.getElementById('okx-secret-key').value = '';
+      document.getElementById('okx-passphrase').value = '';
+      document.getElementById('okx-api-key').placeholder = data.api_key_prefix || 'API Key (configured)';
+      document.getElementById('okx-secret-key').placeholder = 'Secret Key (configured)';
+      document.getElementById('okx-passphrase').placeholder = 'Passphrase (configured)';
+    }
+  } catch (e) {
+    showResult(result, 'error', 'Error: ' + (e.message || e));
+  }
+  btn.disabled = false;
+  btn.textContent = 'Save';
+}
+
+function setOkxStatus(live, preview) {
+  const el = document.getElementById('okx-status');
+  if (live) {
+    el.className = 'okx-status live';
+    el.textContent = 'Live' + (preview ? ' (' + preview + ')' : '');
+  } else {
+    el.className = 'okx-status sim';
+    el.textContent = 'Simulated';
+  }
 }
 
 // ---------- WebSocket ----------
@@ -747,6 +917,7 @@ function updateStats() {
 }
 
 connect();
+loadOkxStatus();
 </script>
 </body>
 </html>"#;
