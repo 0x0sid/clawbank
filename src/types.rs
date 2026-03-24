@@ -300,6 +300,10 @@ pub enum DashboardEvent {
     Error {
         message: String,
     },
+    GenericLog {
+        source: String,
+        message: String,
+    },
 }
 
 // ---------------------------------------------------------------------------

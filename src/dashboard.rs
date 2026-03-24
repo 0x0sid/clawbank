@@ -9,7 +9,7 @@
 use crate::banker::Banker;
 use crate::execution::okx_rest::{OkxCredentials, OkxRestClient};
 use crate::monitor::Monitor;
-use crate::types::DashboardEvent;
+use crate::types::{CreditProposal, DashboardEvent, RepaymentTrigger};
 use alloy::primitives::{Address, Signature as EcdsaSignature};
 use axum::{
     extract::{
@@ -47,6 +47,9 @@ pub fn build_router(state: DashboardState) -> Router {
         .route("/api/okx/connect", post(okx_connect_handler))
         .route("/api/okx/status", get(okx_status_handler))
         .route("/api/okx/trades", get(okx_trades_handler))
+        .route("/api/bot/register", post(bot_register_handler))
+        .route("/api/bot/request-credit", post(bot_request_credit_handler))
+        .route("/api/bot/report", post(bot_report_handler))
         .with_state(state)
 }
 
@@ -378,6 +381,119 @@ async fn okx_trades_handler(State(state): State<DashboardState>) -> impl IntoRes
             "trades": [],
         })),
     }
+}
+
+/// Register an agent via simple HTTP (no wallet signature needed — for bots).
+async fn bot_register_handler(
+    State(state): State<DashboardState>,
+    axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+        _ => return Json(serde_json::json!({"error": "Missing 'name'"})),
+    };
+
+    let agent = state.banker.register_agent(name, None).await;
+    info!(agent_id = %agent.id, name = %agent.name, "Bot agent registered via HTTP");
+
+    Json(serde_json::json!({
+        "ok": true,
+        "agent_id": agent.id,
+        "name": agent.name,
+    }))
+}
+
+/// Request a credit line for a bot agent (queued for human approval on dashboard).
+async fn bot_request_credit_handler(
+    State(state): State<DashboardState>,
+    axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let agent_id = match body
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+    {
+        Some(id) => id,
+        None => return Json(serde_json::json!({"error": "Missing or invalid 'agent_id'"})),
+    };
+
+    if !state.banker.is_registered(agent_id).await {
+        return Json(serde_json::json!({"error": format!("Agent {agent_id} not registered")}));
+    }
+
+    let requested_usd = body
+        .get("amount_usd")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(10.0);
+    let strategy = body
+        .get("strategy")
+        .and_then(|v| v.as_str())
+        .unwrap_or("MACD")
+        .to_string();
+    let duration_hours = body
+        .get("duration_hours")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(24.0);
+
+    let now = chrono::Utc::now();
+    let window_end = now + chrono::Duration::hours(duration_hours as i64);
+
+    let proposal = CreditProposal {
+        id: uuid::Uuid::new_v4(),
+        agent_id,
+        submitted_at: now,
+        requested_usd,
+        max_loss_usd: requested_usd * 0.1,
+        target_return_pct: 5.0,
+        window_start: now,
+        window_end,
+        strategy,
+        allowed_pairs: vec!["BTC-USDT".to_string()],
+        max_single_trade_usd: 1.0,
+        repayment_trigger: RepaymentTrigger::TimeExpiry,
+        collateral: None,
+    };
+
+    let decision = state.banker.evaluate(&proposal).await;
+
+    info!(
+        agent_id = %agent_id,
+        proposal_id = %proposal.id,
+        "Bot credit request submitted — pending human approval"
+    );
+
+    Json(serde_json::json!({
+        "ok": true,
+        "proposal_id": proposal.id,
+        "status": "pending_approval",
+        "decision": decision,
+        "message": "Credit proposal submitted — approve it on the dashboard",
+    }))
+}
+
+/// Bot reports simulation progress (broadcast to dashboard as live event).
+async fn bot_report_handler(
+    State(state): State<DashboardState>,
+    axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let agent_id = body
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let message = body
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Broadcast as a generic dashboard event so it shows in Live Events
+    let _ = state.tx.send(DashboardEvent::GenericLog {
+        source: format!("bot:{}", &agent_id[..agent_id.len().min(8)]),
+        message: message.clone(),
+    });
+
+    Json(serde_json::json!({"ok": true}))
 }
 
 /// Inline HTML for the dashboard — no build step required.
