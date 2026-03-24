@@ -1,13 +1,15 @@
 //! Axum HTTP + WebSocket dashboard — no build step, inline HTML.
 //!
-//! Three routes:
-//! - `GET /`            — inline HTML dashboard
-//! - `GET /ws`          — WebSocket live event stream
-//! - `GET /api/snapshot` — full state JSON
+//! Routes:
+//! - `GET /`                     — inline HTML dashboard
+//! - `GET /ws`                   — WebSocket live event stream
+//! - `GET /api/snapshot`         — full state JSON
+//! - `POST /api/agent/register`  — register agent via wallet signature
 
 use crate::banker::Banker;
 use crate::monitor::Monitor;
 use crate::types::DashboardEvent;
+use alloy::primitives::{Address, Signature as EcdsaSignature};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -39,6 +41,7 @@ pub fn build_router(state: DashboardState) -> Router {
         .route("/api/credit/:proposal_id/reject", post(reject_handler))
         .route("/api/x402/:payment_id/approve", post(x402_approve_handler))
         .route("/api/x402/:payment_id/block", post(x402_block_handler))
+        .route("/api/agent/register", post(wallet_register_handler))
         .with_state(state)
 }
 
@@ -214,6 +217,83 @@ async fn x402_block_handler(
     }
 }
 
+/// Register an agent via wallet signature (called from dashboard wallet connect).
+///
+/// Expects JSON body: `{ "name": "...", "evm_address": "0x...", "signature": "0x..." }`
+/// The signature must be a `personal_sign` of the message:
+///   `"Register as OpenClaw agent: <name>"`
+async fn wallet_register_handler(
+    State(state): State<DashboardState>,
+    axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+        _ => return Json(serde_json::json!({"error": "Missing or empty 'name'"})),
+    };
+    let evm_address = match body.get("evm_address").and_then(|v| v.as_str()) {
+        Some(a) => a.to_string(),
+        None => return Json(serde_json::json!({"error": "Missing 'evm_address'"})),
+    };
+    let sig_hex = match body.get("signature").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return Json(serde_json::json!({"error": "Missing 'signature'"})),
+    };
+
+    // Parse the claimed address
+    let claimed: Address = match evm_address.parse() {
+        Ok(a) => a,
+        Err(_) => return Json(serde_json::json!({"error": "Invalid EVM address format"})),
+    };
+
+    // Parse the signature (65 bytes: r[32] + s[32] + v[1])
+    let sig_bytes = match hex::decode(sig_hex.strip_prefix("0x").unwrap_or(&sig_hex)) {
+        Ok(b) if b.len() == 65 => b,
+        _ => return Json(serde_json::json!({"error": "Invalid signature (expected 65-byte hex)"})),
+    };
+
+    let signature = match EcdsaSignature::from_raw(&sig_bytes) {
+        Ok(s) => s,
+        Err(_) => return Json(serde_json::json!({"error": "Malformed ECDSA signature"})),
+    };
+
+    // Verify: recover address from personal_sign message
+    let message = format!("Register as OpenClaw agent: {name}");
+    let recovered = match signature.recover_address_from_msg(message.as_bytes()) {
+        Ok(addr) => addr,
+        Err(e) => {
+            warn!(error = %e, "Wallet registration: signature recovery failed");
+            return Json(serde_json::json!({"error": "Signature verification failed"}));
+        }
+    };
+
+    if recovered != claimed {
+        warn!(
+            claimed = %claimed,
+            recovered = %recovered,
+            "Wallet registration: address mismatch"
+        );
+        return Json(serde_json::json!({"error": "Signature does not match claimed address"}));
+    }
+
+    // Signature valid — register the agent with the verified EVM address
+    let agent = state
+        .banker
+        .register_agent(name.clone(), Some(evm_address.clone()))
+        .await;
+
+    info!(
+        agent_id = %agent.id,
+        name = %name,
+        evm_address = %evm_address,
+        "Agent registered via wallet signature"
+    );
+
+    Json(serde_json::json!({
+        "ok": true,
+        "agent": agent,
+    }))
+}
+
 /// Inline HTML for the dashboard — no build step required.
 const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
@@ -269,6 +349,18 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
   .proposal-card .score.low { color: var(--red); }
   .proposal-card .meta { color: var(--muted); font-size: 12px; margin: 4px 0 10px; }
   .proposal-card .actions { margin-top: 10px; }
+  .wallet-bar { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+  .wallet-addr { font-family: 'Consolas', monospace; font-size: 12px; color: var(--green); background: rgba(16,185,129,0.1); padding: 4px 10px; border-radius: 6px; }
+  .btn-wallet { padding: 8px 18px; border: 1px solid var(--accent); background: transparent; color: var(--accent); border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+  .btn-wallet:hover { background: var(--accent); color: #fff; }
+  .btn-wallet.connected { border-color: var(--green); color: var(--green); }
+  .btn-wallet.connected:hover { background: var(--green); color: #fff; }
+  .register-form { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .register-form input { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 13px; min-width: 200px; }
+  .register-form input:focus { outline: none; border-color: var(--accent); }
+  .register-result { margin-top: 10px; padding: 10px 14px; border-radius: 6px; font-size: 13px; display: none; }
+  .register-result.success { display: block; background: rgba(16,185,129,0.1); color: var(--green); border: 1px solid rgba(16,185,129,0.3); }
+  .register-result.error { display: block; background: rgba(239,68,68,0.1); color: var(--red); border: 1px solid rgba(239,68,68,0.3); }
 </style>
 </head>
 <body>
@@ -276,6 +368,10 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
   <h1>OpenClaw AI Bank</h1>
   <span class="status-dot" id="ws-status"></span>
   <span id="ws-label" style="color:var(--muted);font-size:12px;">Disconnected</span>
+  <div class="wallet-bar">
+    <span id="wallet-addr" class="wallet-addr" style="display:none;"></span>
+    <button class="btn-wallet" id="btn-connect" onclick="connectWallet()">Connect Wallet</button>
+  </div>
 </header>
 
 <div class="grid">
@@ -287,6 +383,16 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
   <div class="panel full-width">
     <h2>Pending x402 Payments (requires your review)</h2>
     <div id="x402-panel"><div class="empty">No pending x402 payments</div></div>
+  </div>
+
+  <div class="panel full-width" id="register-panel" style="display:none;">
+    <h2>Register as Agent</h2>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:12px;">Connected wallet will be your agent address. Sign a message to prove ownership.</p>
+    <div class="register-form">
+      <input type="text" id="agent-name" placeholder="Agent display name" maxlength="64" />
+      <button class="btn btn-approve" onclick="registerAgent()" id="btn-register">Sign &amp; Register</button>
+    </div>
+    <div class="register-result" id="register-result"></div>
   </div>
 
   <div class="panel">
@@ -323,6 +429,103 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 <script>
 const state = { trades: 0, approved: 0, rejected: 0, recalls: 0 };
 let ws;
+let walletAddress = null;
+
+// ---------- Wallet Connect ----------
+
+async function connectWallet() {
+  if (!window.ethereum) {
+    alert('No Web3 wallet detected.\nInstall MetaMask, OKX Wallet, or Rabby.');
+    return;
+  }
+  try {
+    const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+    if (accounts.length === 0) return;
+    walletAddress = accounts[0];
+    const short = walletAddress.substring(0, 6) + '...' + walletAddress.substring(38);
+    document.getElementById('wallet-addr').textContent = short;
+    document.getElementById('wallet-addr').style.display = 'inline-block';
+    document.getElementById('btn-connect').textContent = 'Connected';
+    document.getElementById('btn-connect').classList.add('connected');
+    document.getElementById('register-panel').style.display = 'block';
+  } catch (e) {
+    console.error('Wallet connect failed:', e);
+    alert('Wallet connect failed: ' + (e.message || e));
+  }
+}
+
+// Listen for account changes
+if (window.ethereum) {
+  window.ethereum.on('accountsChanged', (accounts) => {
+    if (accounts.length === 0) {
+      walletAddress = null;
+      document.getElementById('wallet-addr').style.display = 'none';
+      document.getElementById('btn-connect').textContent = 'Connect Wallet';
+      document.getElementById('btn-connect').classList.remove('connected');
+      document.getElementById('register-panel').style.display = 'none';
+    } else {
+      walletAddress = accounts[0];
+      const short = walletAddress.substring(0, 6) + '...' + walletAddress.substring(38);
+      document.getElementById('wallet-addr').textContent = short;
+    }
+  });
+}
+
+async function registerAgent() {
+  const name = document.getElementById('agent-name').value.trim();
+  const result = document.getElementById('register-result');
+  result.className = 'register-result';
+  result.style.display = 'none';
+
+  if (!walletAddress) { showResult(result, 'error', 'Connect your wallet first.'); return; }
+  if (!name) { showResult(result, 'error', 'Enter an agent name.'); return; }
+
+  const btn = document.getElementById('btn-register');
+  btn.disabled = true;
+  btn.textContent = 'Signing...';
+
+  try {
+    const message = 'Register as OpenClaw agent: ' + name;
+    const signature = await window.ethereum.request({
+      method: 'personal_sign',
+      params: [message, walletAddress],
+    });
+
+    btn.textContent = 'Registering...';
+
+    const resp = await fetch('/api/agent/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, evm_address: walletAddress, signature }),
+    });
+    const data = await resp.json();
+
+    if (data.ok) {
+      showResult(result, 'success',
+        'Registered! Agent ID: ' + data.agent.id + ' | Address: ' + walletAddress);
+      document.getElementById('agent-name').value = '';
+      fetchSnapshot();
+    } else {
+      showResult(result, 'error', data.error || 'Registration failed');
+    }
+  } catch (e) {
+    if (e.code === 4001) {
+      showResult(result, 'error', 'Signature rejected by user.');
+    } else {
+      showResult(result, 'error', 'Error: ' + (e.message || e));
+    }
+  }
+  btn.disabled = false;
+  btn.textContent = 'Sign & Register';
+}
+
+function showResult(el, type, msg) {
+  el.className = 'register-result ' + type;
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+
+// ---------- WebSocket ----------
 
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -411,8 +614,8 @@ function summarize(ev) {
 function renderAgents(agents) {
   const el = document.getElementById('agents-panel');
   if (!agents.length) { el.innerHTML = '<div class="empty">No agents registered</div>'; return; }
-  el.innerHTML = '<table><tr><th>ID</th><th>Name</th><th>Registered</th></tr>' +
-    agents.map(a => '<tr><td>' + a.id.substring(0,8) + '</td><td>' + a.name + '</td><td>' + new Date(a.registered_at).toLocaleTimeString() + '</td></tr>').join('') + '</table>';
+  el.innerHTML = '<table><tr><th>ID</th><th>Name</th><th>Wallet</th><th>Registered</th></tr>' +
+    agents.map(a => '<tr><td>' + a.id.substring(0,8) + '</td><td>' + a.name + '</td><td style="font-family:Consolas,monospace;font-size:12px">' + (a.evm_address ? a.evm_address.substring(0,6) + '...' + a.evm_address.substring(38) : '<span style="color:var(--muted)">none</span>') + '</td><td>' + new Date(a.registered_at).toLocaleTimeString() + '</td></tr>').join('') + '</table>';
 }
 
 function renderPending(proposals) {
