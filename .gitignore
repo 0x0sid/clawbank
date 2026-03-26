@@ -101,3 +101,7 @@ docker-compose.override.yml
 scripts/local-*
 run.sh
 start.sh
+
+# Project documentation (local only)
+BUILD_BIBLE.md
+agents.md
