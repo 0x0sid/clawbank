@@ -667,7 +667,9 @@ let walletAddress = null;
 // ---------- Wallet Detection ----------
 (function detectWallet() {
   const btn = document.getElementById('btn-connect');
-  if (!window.ethereum) {
+  // Check for any wallet: MetaMask (ethereum), OKX Wallet (okexchain), or generic ethereum
+  const hasWallet = typeof window.ethereum !== 'undefined' || typeof window.okxwallet !== 'undefined' || typeof window.okexchain !== 'undefined';
+  if (!hasWallet) {
     btn.classList.add('disabled');
     btn.textContent = 'No Wallet';
     btn.title = 'Install MetaMask, OKX Wallet, or Rabby browser extension';
@@ -678,12 +680,14 @@ let walletAddress = null;
 // ---------- Wallet Connect ----------
 
 async function connectWallet() {
-  if (!window.ethereum) {
+  // Try OKX Wallet first, then generic ethereum
+  const provider = window.okxwallet || window.okexchain || window.ethereum;
+  if (!provider) {
     alert('No Web3 wallet detected.\nInstall MetaMask, OKX Wallet, or Rabby browser extension.');
     return;
   }
   try {
-    const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+    const accounts = await provider.request({ method: 'eth_requestAccounts' });
     if (!accounts || accounts.length === 0) {
       alert('No accounts found in your wallet.\nCreate or import an account first.');
       return;
@@ -709,8 +713,9 @@ async function connectWallet() {
 }
 
 // Listen for account changes
-if (window.ethereum) {
-  window.ethereum.on('accountsChanged', (accounts) => {
+const walletProvider = window.okxwallet || window.okexchain || window.ethereum;
+if (walletProvider) {
+  walletProvider.on('accountsChanged', (accounts) => {
     if (accounts.length === 0) {
       walletAddress = null;
       document.getElementById('wallet-addr').style.display = 'none';
@@ -738,9 +743,11 @@ async function registerAgent() {
   btn.disabled = true;
   btn.textContent = 'Signing...';
 
+  const provider = window.okxwallet || window.okexchain || window.ethereum;
+
   try {
     const message = 'Register as OpenClaw agent: ' + name;
-    const signature = await window.ethereum.request({
+    const signature = await provider.request({
       method: 'personal_sign',
       params: [message, walletAddress],
     });
