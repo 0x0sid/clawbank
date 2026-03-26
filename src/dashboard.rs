@@ -21,7 +21,7 @@ use axum::{
     Router,
 };
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock};
 use tracing::{error, info, warn};
 
 /// Shared state for dashboard handlers.
@@ -31,6 +31,8 @@ pub struct DashboardState {
     pub monitor: Arc<Monitor>,
     pub tx: broadcast::Sender<DashboardEvent>,
     pub okx_rest: Arc<OkxRestClient>,
+    /// Currently connected wallet address (MetaMask/OKX/etc) for MCP bridge
+    pub connected_wallet: Arc<RwLock<Option<String>>>,
 }
 
 /// Build the Axum router for the dashboard.
@@ -50,6 +52,8 @@ pub fn build_router(state: DashboardState) -> Router {
         .route("/api/bot/register", post(bot_register_handler))
         .route("/api/bot/request-credit", post(bot_request_credit_handler))
         .route("/api/bot/report", post(bot_report_handler))
+        .route("/api/wallet/status", get(wallet_status_handler))
+        .route("/api/wallet/connect", post(wallet_connect_handler))
         .with_state(state)
 }
 
@@ -496,6 +500,38 @@ async fn bot_report_handler(
     Json(serde_json::json!({"ok": true}))
 }
 
+/// Get the currently connected wallet address (for MCP bridge).
+async fn wallet_status_handler(State(state): State<DashboardState>) -> impl IntoResponse {
+    let wallet = state.connected_wallet.read().await.clone();
+    Json(serde_json::json!({
+        "connected": wallet.is_some(),
+        "address": wallet,
+    }))
+}
+
+/// Report a connected wallet from the dashboard UI to the backend.
+async fn wallet_connect_handler(
+    State(state): State<DashboardState>,
+    axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let address = body
+        .get("address")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let mut wallet = state.connected_wallet.write().await;
+    *wallet = address.clone();
+
+    if let Some(ref addr) = address {
+        info!(address = %addr, "Wallet connected via dashboard");
+    }
+
+    Json(serde_json::json!({
+        "ok": true,
+        "address": address,
+    }))
+}
+
 /// Inline HTML for the dashboard — no build step required.
 const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
@@ -699,6 +735,13 @@ async function connectWallet() {
     document.getElementById('btn-connect').textContent = 'Connected';
     document.getElementById('btn-connect').classList.add('connected');
     document.getElementById('register-panel').style.display = 'block';
+    
+    // Report connected wallet to backend for MCP bridge
+    fetch('/api/wallet/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ address: walletAddress })
+    }).catch(e => console.error('Failed to report wallet:', e));
   } catch (e) {
     console.error('Wallet connect failed:', e);
     const msg = (e.message || String(e)).toLowerCase();
@@ -715,13 +758,19 @@ async function connectWallet() {
 // Listen for account changes
 const walletProvider = window.okxwallet || window.okexchain || window.ethereum;
 if (walletProvider) {
-  walletProvider.on('accountsChanged', (accounts) => {
+  walletProvider.on('accountsChanged', async (accounts) => {
     if (accounts.length === 0) {
       walletAddress = null;
       document.getElementById('wallet-addr').style.display = 'none';
       document.getElementById('btn-connect').textContent = 'Connect Wallet';
       document.getElementById('btn-connect').classList.remove('connected');
       document.getElementById('register-panel').style.display = 'none';
+      // Report disconnected wallet to backend
+      await fetch('/api/wallet/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address: null })
+      }).catch(e => console.error('Failed to report wallet disconnect:', e));
     } else {
       walletAddress = accounts[0];
       const short = walletAddress.substring(0, 6) + '...' + walletAddress.substring(38);

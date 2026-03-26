@@ -159,6 +159,25 @@ pub fn build_manifest() -> McpManifest {
                     "required": ["agent_id", "recipient", "amount_usd", "service_url", "purpose"]
                 }),
             },
+            McpTool {
+                name: "get_connected_wallet".to_string(),
+                description: "Get the currently connected MetaMask/OKX wallet address from the dashboard. Returns null if no wallet is connected.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            McpTool {
+                name: "register_with_wallet".to_string(),
+                description: "Register an agent using the currently connected wallet address. The wallet must be connected via the dashboard first.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Agent display name" }
+                    },
+                    "required": ["name"]
+                }),
+            },
         ],
     }
 }
@@ -173,6 +192,7 @@ pub async fn run_stdio_loop(
     cex_executor: Arc<OkxCexExecutor>,
     onchain_executor: Arc<OkxOnchainExecutor>,
     tx: broadcast::Sender<DashboardEvent>,
+    connected_wallet: Arc<tokio::sync::RwLock<Option<String>>>,
 ) {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -211,6 +231,7 @@ pub async fn run_stdio_loop(
             &cex_executor,
             &onchain_executor,
             &tx,
+            &connected_wallet,
         )
         .await;
 
@@ -244,6 +265,7 @@ async fn handle_request(
     cex_executor: &Arc<OkxCexExecutor>,
     onchain_executor: &Arc<OkxOnchainExecutor>,
     tx: &broadcast::Sender<DashboardEvent>,
+    connected_wallet: &Arc<tokio::sync::RwLock<Option<String>>>,
 ) -> JsonRpcResponse {
     match request.method.as_str() {
         // MCP capability discovery
@@ -288,6 +310,12 @@ async fn handle_request(
                 }
                 Some("submit_x402_payment") => {
                     handle_submit_x402(request, banker, &arguments).await
+                }
+                Some("get_connected_wallet") => {
+                    handle_get_connected_wallet(request, connected_wallet).await
+                }
+                Some("register_with_wallet") => {
+                    handle_register_with_wallet(request, banker, connected_wallet, &arguments).await
                 }
                 Some(name) => JsonRpcResponse::error(
                     request.id.clone(),
@@ -910,6 +938,70 @@ async fn handle_submit_x402(
             }),
         )
     }
+}
+
+// ---------------------------------------------------------------------------
+// Wallet handlers
+// ---------------------------------------------------------------------------
+
+async fn handle_get_connected_wallet(
+    req: &JsonRpcRequest,
+    connected_wallet: &Arc<tokio::sync::RwLock<Option<String>>>,
+) -> JsonRpcResponse {
+    let wallet = connected_wallet.read().await.clone();
+    JsonRpcResponse::success(
+        req.id.clone(),
+        serde_json::json!({
+            "content": [{
+                "type": "text",
+                "text": serde_json::to_string(&serde_json::json!({
+                    "connected": wallet.is_some(),
+                    "address": wallet,
+                })).unwrap_or_default()
+            }]
+        }),
+    )
+}
+
+async fn handle_register_with_wallet(
+    req: &JsonRpcRequest,
+    banker: &Arc<Banker>,
+    connected_wallet: &Arc<tokio::sync::RwLock<Option<String>>>,
+    args: &serde_json::Value,
+) -> JsonRpcResponse {
+    let name = match args.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            return JsonRpcResponse::error(
+                req.id.clone(),
+                -32602,
+                "Missing required parameter: name".to_string(),
+            );
+        }
+    };
+
+    let wallet = connected_wallet.read().await.clone();
+    let evm_address = match wallet {
+        Some(addr) => addr,
+        None => {
+            return JsonRpcResponse::error(
+                req.id.clone(),
+                -32602,
+                "No wallet connected. Connect MetaMask or OKX Wallet via the dashboard first.".to_string(),
+            );
+        }
+    };
+
+    let agent = banker.register_agent(name, Some(evm_address)).await;
+    JsonRpcResponse::success(
+        req.id.clone(),
+        serde_json::json!({
+            "content": [{
+                "type": "text",
+                "text": serde_json::to_string(&agent).unwrap_or_default()
+            }]
+        }),
+    )
 }
 
 // ---------------------------------------------------------------------------

@@ -81,6 +81,9 @@ async fn main() {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
+    // Shared connected wallet state (bridges dashboard wallet connect to MCP)
+    let connected_wallet: Arc<tokio::sync::RwLock<Option<String>>> = Arc::new(tokio::sync::RwLock::new(None));
+
     // Task 1: MCP stdio loop
     let mcp_banker = Arc::clone(&banker);
     let mcp_guardian = Arc::clone(&guardian);
@@ -88,6 +91,7 @@ async fn main() {
     let mcp_cex = Arc::clone(&cex_executor);
     let mcp_onchain = Arc::clone(&onchain_executor);
     let mcp_tx = tx.clone();
+    let mcp_wallet = Arc::clone(&connected_wallet);
 
     let mcp_task = tokio::spawn(async move {
         mcp::skill::run_stdio_loop(
@@ -97,6 +101,7 @@ async fn main() {
             mcp_cex,
             mcp_onchain,
             mcp_tx,
+            mcp_wallet,
         )
         .await;
     });
@@ -107,6 +112,7 @@ async fn main() {
         monitor: Arc::clone(&monitor),
         tx: tx.clone(),
         okx_rest: Arc::clone(&rest_client),
+        connected_wallet: Arc::clone(&connected_wallet),
     };
 
     let dashboard_task = tokio::spawn(async move {
